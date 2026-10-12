@@ -92,7 +92,7 @@ if(PS2_GENERATED)
         set(PS2_WEB_BOOT_FILE "" CACHE FILEPATH "Text file holding the argv[0] the game sees, preloaded as /game/boot.txt")
         add_executable(ps2web host/web.cpp)
         if(PS2_WEB_BOOT_FILE)
-            target_link_options(ps2web PRIVATE "SHELL:--preload-file ${PS2_WEB_BOOT_FILE}@/game/boot.txt")
+            target_link_options(ps2web PRIVATE "SHELL:--preload-file \"${PS2_WEB_BOOT_FILE}@/game/boot.txt\"")
         endif()
         target_link_libraries(ps2web PRIVATE ps2game ps2runtime)
         target_link_options(ps2web PRIVATE --profiling-funcs -sJSPI -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=268435456 -sPTHREAD_POOL_SIZE=2 -sALLOW_TABLE_GROWTH=1 -lidbfs.js -sSTACK_SIZE=16777216 -sENVIRONMENT=web

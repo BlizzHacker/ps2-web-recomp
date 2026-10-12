@@ -19,4 +19,4 @@ emcmake cmake -S "$here" -B "$out" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DPS2_GENERATED="$here/generated/$game" -DPS2_WEB_ELF="$elf" -DPS2_WEB_BOOT_FILE="$out/boot.txt"
 ninja -C "$out" ps2web
 gzip -kf9 "$out/ps2web.wasm" "$out/ps2web.data" "$out/ps2web.js"
-echo "built $out/ps2web.html; serve it with scripts/serve.py build/web-$game games/$game/disc.iso"
+printf 'built %s/ps2web.html; serve it with scripts/serve.py %q %q\n' "$out" "build/web-$game" "games/$game/disc.iso"

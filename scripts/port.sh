@@ -150,8 +150,8 @@ fi
 echo "== [6/6] web build"
 "$here/build_web.sh" "$name" "$EMSDK"
 echo
-echo "Done. Serve it with:  python3 scripts/serve.py build/web-$name games/$name/disc.iso"
+printf 'Done. Serve it with:  python3 scripts/serve.py %q %q\n' "build/web-$name" "games/$name/disc.iso"
 echo "and open http://localhost:8620/"
 if [ -x "$native/ps2run" ]; then
-  echo "or play it natively:  build/native-$name/ps2run ${elf#$ROOT/} --disc games/$name/disc.iso --window"
+  printf 'or play it natively:  %q %q --disc %q --window\n' "build/native-$name/ps2run" "${elf#$ROOT/}" "games/$name/disc.iso"
 fi
