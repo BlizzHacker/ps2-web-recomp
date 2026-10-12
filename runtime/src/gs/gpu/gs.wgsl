@@ -9,6 +9,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> clut: array<u32>;
 @group(0) @binding(5) var<storage, read_write> scratch: array<u32>;
 @group(0) @binding(6) var<storage, read> cache: array<u32>;
+@group(0) @binding(7) var<storage, read_write> decoded: array<u32>;
 
 override SCALE: u32 = 1u;
 
@@ -436,6 +437,7 @@ struct Setup {
     fogcol: u32,
     clut: u32,
     zmax: u32,
+    dec: u32,
     tf: Fmt,
     ff: Fmt,
     zf: Fmt,
@@ -490,6 +492,7 @@ fn load_setup(at: u32) -> Setup {
     s.fogcol = data[at + 21u];
     s.clut = data[at + 22u];
     s.zmax = data[at + 23u];
+    s.dec = data[at + 24u];
     s.tf = fmt_of(s.tpsm, s.tbp, s.tbw);
     s.ff = fmt_of(s.fpsm, s.fbp, s.fbw);
     s.zf = fmt_of(s.zpsm, s.zbp, s.fbw);
@@ -557,7 +560,12 @@ fn load_texel(l: Loc, k: u32) -> u32 {
 }
 
 fn fetch(s: Setup, xi: i32, yi: i32, k: u32) -> u32 {
-    return convert(s, load_texel(addr(s.tf, texel_x(s, xi), texel_y(s, yi)), k));
+    let x = texel_x(s, xi);
+    let y = texel_y(s, yi);
+    if (s.dec != 0xFFFFFFFFu) {
+        return decoded[s.dec + (y << s.tw) + x];
+    }
+    return convert(s, load_texel(addr(s.tf, x, y), k));
 }
 
 fn convert(s: Setup, raw: u32) -> u32 {
@@ -915,7 +923,7 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
 }
 
 const PRIM_WORDS: u32 = 28u;
-const SETUP_WORDS: u32 = 24u;
+const SETUP_WORDS: u32 = 25u;
 
 fn fat(i: u32) -> f32 {
     return bitcast<f32>(data[i]);
@@ -1062,6 +1070,18 @@ fn shade_at(p: u32, s: Setup, x: i32, y: i32, k: u32, px: f32, py: f32) {
         }
     }
     plot(s, x, y, k, at);
+}
+
+@compute @workgroup_size(64)
+fn decode(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 64u * 1024u;
+    if (i >= prm(2u)) {
+        return;
+    }
+    let s = load_setup(prm(0u));
+    let x = i & ((1u << s.tw) - 1u);
+    let y = i >> s.tw;
+    decoded[prm(1u) + i] = convert(s, load_at(addr(s.tf, x, y), 0u));
 }
 
 @compute @workgroup_size(64)

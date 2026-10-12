@@ -28,14 +28,16 @@ namespace ps2::gs::gpu {
 
 namespace {
 
-enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kPipelines };
-const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot"};
+enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kDecode, kPipelines };
+const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot", "decode"};
 
 constexpr std::uint32_t kParamStride = 256;
 constexpr std::uint32_t kClutSlots = 2048;
 constexpr std::uint32_t kClutEntries = 512;
 constexpr std::uint32_t kPrimWords = 28;
-constexpr std::uint32_t kSetupWords = 24;
+constexpr std::uint32_t kSetupWords = 25;
+constexpr std::uint32_t kDecodedWords = 4u << 20;
+constexpr std::uint32_t kDecodePrims = 64;
 
 Mode g_mode = Mode::off;
 std::uint64_t g_dispatches[kPipelines] = {}, g_submits = 0;
@@ -62,7 +64,10 @@ bool g_query_pending = false, g_query_ready = false;
 std::uint64_t g_measured_ns = 0, g_measured = 0, g_total_passes = 0;
 WGPUDevice g_device = nullptr;
 WGPUQueue g_queue = nullptr;
-WGPUBuffer g_vram = nullptr, g_tables = nullptr, g_params = nullptr, g_data = nullptr, g_clut = nullptr, g_scratch = nullptr, g_readback = nullptr;
+WGPUBuffer g_vram = nullptr, g_tables = nullptr, g_params = nullptr, g_data = nullptr, g_clut = nullptr, g_scratch = nullptr, g_readback = nullptr, g_decoded = nullptr;
+std::uint32_t g_decoded_used = 0;
+bool g_rendered[512] = {};
+bool g_decode = true;
 std::uint64_t g_params_size = 0, g_data_size = 0;
 WGPUBindGroupLayout g_layout = nullptr;
 WGPUPipelineLayout g_pipeline_layout = nullptr;
@@ -429,6 +434,55 @@ Range pages(std::uint32_t bp, std::uint32_t bw, std::uint32_t psm, int x0, int y
     return r;
 }
 
+void mark_rendered(const Range &r) {
+    for (std::uint64_t at = r.lo; at < r.hi; at += 8192) g_rendered[(at >> 13) & 511u] = true;
+}
+
+bool rendered(const Range &r) {
+    for (std::uint64_t at = r.lo; at < r.hi; at += 8192)
+        if (g_rendered[(at >> 13) & 511u]) return true;
+    return false;
+}
+
+struct Decode {
+    std::uint32_t setup, offset, words;
+};
+std::vector<Decode> g_decodes;
+
+void plan_decodes(std::uint32_t prims) {
+    Batch &b = g_batch;
+    g_decodes.clear();
+    if (!g_decode || prims <= kDecodePrims) return;
+    const std::uint32_t setups = static_cast<std::uint32_t>(b.setups.size() / kSetupWords);
+    static const int kKey[] = {12, 13, 14, 15, 16, 17, 20, 22};
+    for (std::uint32_t i = 0; i < setups; ++i) {
+        std::uint32_t *w = b.setups.data() + i * kSetupWords;
+        if (!(w[0] & 2u)) continue;
+        bool shared = false;
+        for (const Decode &d : g_decodes) {
+            const std::uint32_t *o = b.setups.data() + d.setup * kSetupWords;
+            bool same = (o[0] & 32768u) == (w[0] & 32768u);
+            for (int k : kKey) same = same && o[k] == w[k];
+            if (same) {
+                w[24] = d.offset;
+                shared = true;
+                break;
+            }
+        }
+        if (shared) continue;
+        const std::uint32_t tw = w[15] & 0xFFu, th = w[15] >> 8;
+        const std::uint32_t mu = (w[7] >> 24) & 3u, mv = (w[7] >> 26) & 3u;
+        const auto inside = [](std::uint32_t mode, std::uint32_t region, std::uint32_t size) { return mode < 2 || ((region & 0x3FFu) < (1u << size) && (region >> 16) < (1u << size)); };
+        if (!inside(mu, w[18], tw) || !inside(mv, w[19], th)) continue;
+        const std::uint32_t words = 1u << (tw + th);
+        if (g_decoded_used + words > kDecodedWords) continue;
+        if (g_scale > 1 && rendered(pages(w[12], w[13], w[14], 0, 0, (1 << tw) - 1, (1 << th) - 1))) continue;
+        w[24] = g_decoded_used;
+        g_decodes.push_back({i, g_decoded_used, words});
+        g_decoded_used += words;
+    }
+}
+
 std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi) {
     Batch &b = g_batch;
     lo = hi = 0;
@@ -488,8 +542,10 @@ void flush_batch() {
         }
     }
     g_span_start[prims] = static_cast<std::uint32_t>(g_spans.size());
+    plan_decodes(prims);
     const std::uint32_t prim_offset = arena_append(b.prims.data(), b.prims.size() * 4);
     const std::uint32_t setup_offset = arena_append(b.setups.data(), b.setups.size() * 4);
+    for (const Decode &d : g_decodes) dispatch_linear(kDecode, d.words, push_params({setup_offset + d.setup * kSetupWords, d.offset, d.words}));
     std::uint32_t total = 0;
     for (std::uint32_t t : g_touched) total += g_tile_count[t];
     const std::uint32_t tiles = static_cast<std::uint32_t>(g_touched.size());
@@ -523,6 +579,8 @@ void flush_batch() {
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi});
     note_raster(prims, tiles, total, snapshot);
     g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
+    mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
+    if (b.zwrite) mark_rendered(pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy));
     b.prims.clear();
     b.setups.clear();
     b.boxes.clear();
@@ -628,10 +686,17 @@ std::uint64_t queue_upload(const std::uint8_t *bytes, std::size_t size, std::uin
 
 void finish_image_if_done() {
     Image &im = g_image;
-    if (im.done >= im.total) {
-        im.active = false;
-        im.pending.clear();
-    }
+    if (im.done < im.total) return;
+    im.active = false;
+    im.pending.clear();
+    const std::uint32_t psm = im.dpsm;
+    if (psm != PSMCT32 && psm != PSMCT16 && psm != PSMCT16S && psm != PSMT8 && psm != PSMT4 && psm != PSMZ32 && psm != PSMZ16 && psm != PSMZ16S) return;
+    std::uint32_t pw, ph;
+    page_size(psm, pw, ph);
+    const std::uint32_t per_row = std::max<std::uint32_t>(1, im.dbw * 64 / pw), rows = im.rrw ? im.total / im.rrw : 0;
+    for (std::uint32_t py = (im.dsay + ph - 1) / ph; py < (im.dsay + rows) / ph; ++py)
+        for (std::uint32_t px = (im.dsax + pw - 1) / pw; px < (im.dsax + im.rrw) / pw; ++px)
+            g_rendered[((im.dbp * 256 + (px + py * per_row) * 8192) >> 13) & 511u] = false;
 }
 
 void flush_image() {
@@ -676,9 +741,9 @@ WGPUBuffer make_buffer(std::uint64_t size, WGPUBufferUsage usage) {
 
 void rebuild_group() {
     if (g_group) wgpuBindGroupRelease(g_group);
-    WGPUBindGroupEntry e[7] = {};
-    WGPUBuffer buffers[7] = {g_vram, g_tables, g_params, g_data, g_clut, g_scratch, g_cache};
-    for (int i = 0; i < 7; ++i) {
+    WGPUBindGroupEntry e[8] = {};
+    WGPUBuffer buffers[8] = {g_vram, g_tables, g_params, g_data, g_clut, g_scratch, g_cache, g_decoded};
+    for (int i = 0; i < 8; ++i) {
         e[i] = WGPU_BIND_GROUP_ENTRY_INIT;
         e[i].binding = static_cast<std::uint32_t>(i);
         e[i].buffer = buffers[i];
@@ -686,7 +751,7 @@ void rebuild_group() {
     }
     WGPUBindGroupDescriptor d = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     d.layout = g_layout;
-    d.entryCount = 7;
+    d.entryCount = 8;
     d.entries = e;
     g_group = wgpuDeviceCreateBindGroup(g_device, &d);
 }
@@ -774,6 +839,7 @@ void profile_submit() {
     ++g_serial;
     g_param_records.clear();
     g_arena.clear();
+    g_decoded_used = 0;
     g_clut_loads = 0;
 }
 
@@ -871,6 +937,7 @@ void submit(WGPUTextureView present_view = nullptr) {
     ++g_serial;
     g_param_records.clear();
     g_arena.clear();
+    g_decoded_used = 0;
     g_clut_loads = 0;
 }
 
@@ -943,6 +1010,7 @@ std::uint32_t make_setup(const State &st, std::uint64_t attr, std::uint32_t *w) 
     w[21] = static_cast<std::uint32_t>(st.fogcol) & 0xFFFFFFu;
     w[22] = g_clut_slot;
     w[23] = z_max(zpsm);
+    w[24] = 0xFFFFFFFFu;
     return flags;
 }
 
@@ -1117,6 +1185,8 @@ bool init(Mode m) {
     g_clut = make_buffer(static_cast<std::uint64_t>(kClutSlots) * kClutEntries * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst);
     g_scratch = make_buffer((static_cast<std::uint64_t>(g_copy_words) + 2ull * g_field_words) * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopySrc);
     g_cache = make_buffer(static_cast<std::uint64_t>(kCacheWords) * 4, WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
+    g_decoded = make_buffer(static_cast<std::uint64_t>(kDecodedWords) * 4, WGPUBufferUsage_Storage);
+    if (const char *decode = std::getenv("PS2_DECODE")) g_decode = std::atoi(decode) != 0;
     g_cache_copy.assign(kCacheWords, 0);
     g_readback = make_buffer(static_cast<std::uint64_t>(g_copy_words) * 4, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     if (g_timestamps) {
@@ -1128,11 +1198,11 @@ bool init(Mode m) {
         g_query_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
     }
 
-    WGPUBindGroupLayoutEntry le[7] = {};
-    const WGPUBufferBindingType types[7] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
+    WGPUBindGroupLayoutEntry le[8] = {};
+    const WGPUBufferBindingType types[8] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
                                             WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Storage, WGPUBufferBindingType_Storage,
-                                            WGPUBufferBindingType_ReadOnlyStorage};
-    for (int i = 0; i < 7; ++i) {
+                                            WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Storage};
+    for (int i = 0; i < 8; ++i) {
         le[i] = WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT;
         le[i].binding = static_cast<std::uint32_t>(i);
         le[i].visibility = WGPUShaderStage_Compute;
@@ -1141,7 +1211,7 @@ bool init(Mode m) {
         le[i].buffer.minBindingSize = i == 2 ? kParamStride : 0;
     }
     WGPUBindGroupLayoutDescriptor ld = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-    ld.entryCount = 7;
+    ld.entryCount = 8;
     ld.entries = le;
     g_layout = wgpuDeviceCreateBindGroupLayout(g_device, &ld);
     WGPUPipelineLayoutDescriptor pld = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
@@ -1390,6 +1460,9 @@ void local_copy(const State &s) {
     const std::uint64_t buf = s.bitbltbuf, pos = s.trxpos, reg = s.trxreg;
     const std::uint32_t w = static_cast<std::uint32_t>(reg) & 0xFFFu, h = static_cast<std::uint32_t>(reg >> 32) & 0xFFFu;
     if (!w || !h) return;
+    mark_rendered(pages(static_cast<std::uint32_t>(buf >> 32) & 0x3FFFu, static_cast<std::uint32_t>(buf >> 48) & 0x3Fu, static_cast<std::uint32_t>(buf >> 56) & 0x3Fu,
+                        static_cast<int>(pos >> 32) & 0x7FF, static_cast<int>(pos >> 48) & 0x7FF, (static_cast<int>(pos >> 32) & 0x7FF) + static_cast<int>(w) - 1,
+                        (static_cast<int>(pos >> 48) & 0x7FF) + static_cast<int>(h) - 1));
     const std::uint32_t read = push_params({static_cast<std::uint32_t>(buf) & 0x3FFFu, static_cast<std::uint32_t>(buf >> 16) & 0x3Fu, static_cast<std::uint32_t>(buf >> 24) & 0x3Fu,
                                             static_cast<std::uint32_t>(pos) & 0x7FFu, static_cast<std::uint32_t>(pos >> 16) & 0x7FFu, w, h});
     const std::uint32_t write = push_params({static_cast<std::uint32_t>(buf >> 32) & 0x3FFFu, static_cast<std::uint32_t>(buf >> 48) & 0x3Fu, static_cast<std::uint32_t>(buf >> 56) & 0x3Fu,
@@ -1524,6 +1597,7 @@ void write_state(const std::vector<std::uint32_t> &vram, std::uint32_t scale, co
     wait_idle();
     const std::size_t words = kMemorySize / 4;
     const std::uint32_t from = scale * scale, to = g_scale * g_scale;
+    std::fill(std::begin(g_rendered), std::end(g_rendered), from == to && to > 1);
     if (from == to && vram.size() == words * to) {
         wgpuQueueWriteBuffer(g_queue, g_vram, 0, vram.data(), vram.size() * 4);
     } else {
