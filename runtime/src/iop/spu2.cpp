@@ -48,6 +48,7 @@ struct Voice {
     Envelope vol[2];
     std::uint32_t ssa = 0, lsax = 0, next = 0, block[2] = {};
     bool lsax_written = false, key_on = false, end = false;
+    bool block_end[2] = {};
     Phase phase = kOff;
     Envelope env;
     std::int16_t buffer[56] = {};
@@ -109,10 +110,10 @@ void decode_block(Voice &v, std::int16_t *out) {
         out[i] = static_cast<std::int16_t>(sample);
     }
     v.block[out == v.buffer ? 0 : 1] = at;
+    v.block_end[out == v.buffer ? 0 : 1] = (flags & 1u) != 0;
     if ((flags & 4u) && !v.lsax_written) v.lsax = at;
     v.next = (at + 8) & kRamMask;
     if (flags & 1u) {
-        v.end = true;
         v.next = v.lsax;
         if (!(flags & 2u)) {
             v.phase = kRelease;
@@ -178,7 +179,9 @@ void render_voice(Voice &v, std::int32_t (*sum)[2]) {
         while ((position >> 12) >= 28) {
             position -= 28u << 12;
             std::memmove(v.buffer, v.buffer + 28, 28 * sizeof(std::int16_t));
+            v.end |= v.block_end[0];
             v.block[0] = v.block[1];
+            v.block_end[0] = v.block_end[1];
             v.position = position;
             check_irq(v.block[0], 8);
             decode_block(v, v.buffer + 28);
@@ -400,8 +403,10 @@ void write_core(int core, std::uint32_t off, std::uint32_t value) {
         if (!value) k.input_count = k.input_read = 0;
         break;
     case 0x340:
+        for (int i = 0; i < 16; ++i) k.voices[i].end = false;
+        break;
     case 0x342:
-        for (Voice &v : k.voices) v.end = false;
+        for (int i = 16; i < 24; ++i) k.voices[i].end = false;
         break;
     default: break;
     }
