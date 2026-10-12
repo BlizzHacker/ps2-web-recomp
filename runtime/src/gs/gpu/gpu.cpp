@@ -75,6 +75,16 @@ struct Command {
     std::uint32_t param;
 };
 
+struct CommandInfo {
+    std::size_t index;
+    std::uint32_t values[8];
+};
+std::vector<CommandInfo> g_command_info;
+std::FILE *g_profile_out = nullptr;
+std::uint64_t g_profile_from = 0, g_profile_to = 0;
+WGPUQuerySet g_profile_queries = nullptr;
+WGPUBuffer g_profile_resolve = nullptr, g_profile_read = nullptr;
+
 std::vector<Command> g_commands;
 std::vector<std::array<std::uint32_t, kParamStride / 4>> g_param_records;
 struct Arena {
@@ -436,6 +446,15 @@ std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32
     return words;
 }
 
+void note_raster(std::uint32_t prims, std::uint32_t tiles, std::uint32_t entries, std::uint32_t snapshot) {
+    if (!g_profile_out) return;
+    const Batch &b = g_batch;
+    const std::uint32_t *first = b.setups.data();
+    std::uint32_t textured = 0;
+    for (std::uint32_t i = 0; i < prims; ++i) textured += (b.setups[b.prims[i * kPrimWords] * kSetupWords] & 2u) ? 1u : 0u;
+    g_command_info.push_back({g_commands.size(), {prims, tiles, entries, snapshot, b.prims[1], first[3] | (first[14] << 8) | (first[6] << 16), first[0], textured}});
+}
+
 void flush_batch() {
     Batch &b = g_batch;
     if (b.prims.empty()) {
@@ -488,8 +507,9 @@ void flush_batch() {
     }
     for (std::uint32_t t : g_touched) g_tile_count[t] = 0;
     std::uint32_t snapshot_lo, snapshot_hi;
-    snapshot_batch(prims, snapshot_lo, snapshot_hi);
+    const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi);
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi});
+    note_raster(prims, tiles, total, snapshot);
     g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
     b.prims.clear();
     b.setups.clear();
@@ -678,9 +698,80 @@ void ensure_capacity() {
     if (changed || !g_group) rebuild_group();
 }
 
+void profile_submit() {
+    constexpr std::uint32_t kMax = 2048;
+    if (!g_profile_queries) {
+        WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
+        qd.type = WGPUQueryType_Timestamp;
+        qd.count = kMax * 2;
+        g_profile_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
+        g_profile_resolve = make_buffer(kMax * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+        g_profile_read = make_buffer(kMax * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    }
+    ensure_capacity();
+    wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
+    wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
+    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(g_commands.size(), kMax));
+    for (std::uint32_t i = 0; i < g_commands.size(); ++i) {
+        const Command &c = g_commands[i];
+        WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
+        writes.querySet = g_profile_queries;
+        writes.beginningOfPassWriteIndex = i * 2;
+        writes.endOfPassWriteIndex = i * 2 + 1;
+        WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+        if (i < n) cd.timestampWrites = &writes;
+        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
+        wgpuComputePassEncoderSetPipeline(pass, g_pipelines[c.pipeline]);
+        const std::uint32_t offset = c.param * kParamStride;
+        wgpuComputePassEncoderSetBindGroup(pass, 0, g_group, 1, &offset);
+        wgpuComputePassEncoderDispatchWorkgroups(pass, c.x, c.y, 1);
+        wgpuComputePassEncoderEnd(pass);
+        wgpuComputePassEncoderRelease(pass);
+    }
+    if (n) {
+        wgpuCommandEncoderResolveQuerySet(enc, g_profile_queries, 0, n * 2, g_profile_resolve, 0);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, g_profile_resolve, 0, g_profile_read, 0, n * 16);
+    }
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(g_queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+    if (n) {
+        bool done = false;
+        WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+        cb.mode = WGPUCallbackMode_AllowProcessEvents;
+        cb.callback = [](WGPUMapAsyncStatus, WGPUStringView, void *flag, void *) { *static_cast<bool *>(flag) = true; };
+        cb.userdata1 = &done;
+        wgpuBufferMapAsync(g_profile_read, WGPUMapMode_Read, 0, n * 16, cb);
+        wait_until(done);
+        const auto *t = static_cast<const std::uint64_t *>(wgpuBufferGetConstMappedRange(g_profile_read, 0, n * 16));
+        std::size_t info = 0;
+        for (std::uint32_t i = 0; t && i < n; ++i) {
+            while (info < g_command_info.size() && g_command_info[info].index < i) ++info;
+            std::fprintf(g_profile_out, "%llu %u %s %llu %u %u", static_cast<unsigned long long>(frame_count()), i, kEntryPoints[g_commands[i].pipeline],
+                         static_cast<unsigned long long>(t[i * 2 + 1] > t[i * 2] ? t[i * 2 + 1] - t[i * 2] : 0), g_commands[i].x, g_commands[i].y);
+            if (info < g_command_info.size() && g_command_info[info].index == i)
+                for (std::uint32_t v : g_command_info[info].values) std::fprintf(g_profile_out, " %u", v);
+            std::fprintf(g_profile_out, "\n");
+        }
+        wgpuBufferUnmap(g_profile_read);
+    }
+    g_commands.clear();
+    g_command_info.clear();
+    ++g_serial;
+    g_param_records.clear();
+    g_arena.clear();
+    g_clut_loads = 0;
+}
+
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
 void submit(WGPUTextureView present_view = nullptr) {
     if (g_commands.empty() && !present_view) return;
+    if (g_profile_out && !present_view && g_timestamps && frame_count() >= g_profile_from && frame_count() < g_profile_to) {
+        profile_submit();
+        return;
+    }
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
@@ -764,6 +855,7 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuDevicePoll(g_device, false, nullptr);
 #endif
     g_commands.clear();
+    g_command_info.clear();
     ++g_serial;
     g_param_records.clear();
     g_arena.clear();
@@ -971,6 +1063,15 @@ bool init(Mode m) {
     if (!g_device) return false;
     g_queue = wgpuDeviceGetQueue(g_device);
 
+    if (const char *spec = std::getenv("PS2_GPU_PROFILE")) {
+        char path[512] = {};
+        unsigned long long a = 0, z = 0;
+        if (std::sscanf(spec, "%llu,%llu,%511s", &a, &z, path) == 3) {
+            g_profile_out = std::fopen(path, "w");
+            g_profile_from = a;
+            g_profile_to = z;
+        }
+    }
     if (const char *scale = std::getenv("PS2_SCALE")) g_scale = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::atoi(scale)), 1u, 3u);
     g_copy_words = (1u << 20) * g_scale * g_scale;
     g_tiles_per_row = (2048 * static_cast<int>(g_scale) + 15) / 16;
