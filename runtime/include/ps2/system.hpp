@@ -113,6 +113,8 @@ std::uint64_t frames_run();
 std::uint64_t primitives_drawn();
 void set_pad_buttons(std::uint16_t pressed);
 void set_pad_axis(int axis, std::uint8_t value);
+void set_pad_pressure(int button, std::uint8_t value);
+std::uint16_t pad_rumble();
 void set_audio_sink(std::function<void(const std::int16_t *samples, std::size_t frames)> sink);
 
 }

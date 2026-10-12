@@ -395,11 +395,13 @@ window.addEventListener('keyup', (e) => { keys.delete(e.code); });
 const padButtons = [[0, 14], [1, 13], [2, 15], [3, 12], [4, 10], [5, 11], [6, 8], [7, 9], [8, 0], [9, 3], [10, 1], [11, 2],
                     [12, 4], [13, 6], [14, 7], [15, 5]];
 const axis = (v) => Math.max(0, Math.min(255, Math.round((v + 1) * 127.5)));
-let lastPad = -1;
+let lastPad = -1, lastPressure = '', lastRumble = 0, rumbleAt = 0;
 function pollInput() {
-  let buttons = 0, lx = 128, ly = 128, rx = 128, ry = 128;
+  let buttons = 0, lx = 128, ly = 128, rx = 128, ry = 128, gamepad = null;
+  const pressure = new Array(16).fill(255);
   buttons |= touchPad.buttons;
   for (const k of keys) if (k in keyMap) buttons |= 1 << keyMap[k];
+  const full = buttons;
   if (keys.has('KeyJ')) lx = 0;
   if (keys.has('KeyL')) lx = 255;
   if (keys.has('KeyI')) ly = 0;
@@ -410,7 +412,13 @@ function pollInput() {
   }
   for (const pad of navigator.getGamepads ? navigator.getGamepads() : []) {
     if (!pad) continue;
-    for (const [index, bit] of padButtons) if (pad.buttons[index] && pad.buttons[index].pressed) buttons |= 1 << bit;
+    gamepad = pad;
+    for (const [index, bit] of padButtons) {
+      const b = pad.buttons[index];
+      if (!b || !(b.pressed || b.value > 0.05)) continue;
+      buttons |= 1 << bit;
+      if (!(full & (1 << bit))) pressure[bit] = Math.max(1, Math.round((b.value > 0 ? b.value : 1) * 255));
+    }
     if (pad.axes.length >= 4) {
       if (lx === 128) lx = axis(pad.axes[0]);
       if (ly === 128) ly = axis(pad.axes[1]);
@@ -423,6 +431,19 @@ function pollInput() {
   if (state !== lastPad) {
     lastPad = state;
     Module._ps2web_pad(buttons, lx, ly, rx, ry);
+  }
+  const packed = [0, 1, 2, 3].map((i) => pressure[i * 4] | (pressure[i * 4 + 1] << 8) | (pressure[i * 4 + 2] << 16) | (pressure[i * 4 + 3] << 24));
+  if (packed.join() !== lastPressure) {
+    lastPressure = packed.join();
+    Module._ps2web_pressure(packed[0], packed[1], packed[2], packed[3]);
+  }
+  const rumble = Module._ps2web_rumble(), now = performance.now();
+  const actuator = gamepad && gamepad.vibrationActuator;
+  if (actuator && (rumble !== lastRumble || (rumble && now - rumbleAt > 100))) {
+    lastRumble = rumble;
+    rumbleAt = now;
+    const done = rumble ? actuator.playEffect('dual-rumble', { duration: 200, weakMagnitude: rumble & 1, strongMagnitude: (rumble >> 8) / 255 }) : actuator.reset();
+    if (done && done.catch) done.catch(() => {});
   }
 }
 

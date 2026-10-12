@@ -7,6 +7,7 @@
 #include "ps2/state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,14 @@ struct Pad {
     bool config = false;
     bool locked = false;
     std::uint8_t poll_mask[3] = {0xFF, 0xFF, 0x03};
+};
+
+constexpr std::uint8_t kLibpadMotors[6] = {0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF};
+
+struct Feel {
+    std::uint8_t motors[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    std::uint8_t pressure[16] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    std::atomic<std::uint16_t> rumble{0};
 };
 
 struct Dma {
@@ -53,6 +62,7 @@ std::uint32_t g_index = 0;
 std::uint32_t g_stat = 0;
 std::deque<std::uint8_t> g_in, g_out;
 Pad g_pads[2];
+Feel g_feel[2];
 Card g_card;
 Dma g_dma[2];
 
@@ -64,6 +74,7 @@ void controller(int port, std::size_t at, std::uint32_t out_size) {
         return;
     }
     Pad &p = g_pads[port];
+    Feel &f = g_feel[port];
     const std::vector<std::uint8_t> in(g_in.begin(), g_in.end());
     const std::uint8_t cmd = in.size() > 1 ? in[1] : 0;
     auto put = [&](std::size_t i, std::uint8_t v) {
@@ -84,7 +95,7 @@ void controller(int port, std::size_t at, std::uint32_t out_size) {
         }
         if (p.mode == kPressure) {
             static const int kBits[12] = {5, 7, 4, 6, 12, 13, 14, 15, 10, 11, 8, 9};
-            for (int i = 0; i < 12; ++i) put(9 + static_cast<std::size_t>(i), (p.buttons >> kBits[i]) & 1u ? 0xFF : 0x00);
+            for (int i = 0; i < 12; ++i) put(9 + static_cast<std::size_t>(i), (p.buttons >> kBits[i]) & 1u ? f.pressure[kBits[i]] : 0x00);
         }
     };
     switch (cmd) {
@@ -95,9 +106,16 @@ void controller(int port, std::size_t at, std::uint32_t out_size) {
         if (p.mode == kDigital) for (int i = 3; i < 9; ++i) put(static_cast<std::size_t>(i), 0);
         else { put(3, p.poll_mask[0]); put(4, p.poll_mask[1]); put(5, p.poll_mask[2]); put(6, 0); put(7, 0); put(8, 0x5A); }
         break;
-    case 0x42:
+    case 0x42: {
         data();
+        std::uint8_t small = 0, large = 0;
+        for (std::size_t i = 0; i < 6 && 3 + i < in.size(); ++i) {
+            if (f.motors[i] == 0x00) small = in[3 + i] & 1u;
+            if (f.motors[i] == 0x01) large = in[3 + i];
+        }
+        f.rumble.store(static_cast<std::uint16_t>(small | (large << 8)), std::memory_order_relaxed);
         break;
+    }
     case 0x43:
         if (!p.config) data();
         else for (int i = 3; i < 9; ++i) put(static_cast<std::size_t>(i), 0);
@@ -128,6 +146,8 @@ void controller(int port, std::size_t at, std::uint32_t out_size) {
         break;
     case 0x4D:
         for (int i = 3; i < 9; ++i) put(static_cast<std::size_t>(i), 0xFF);
+        for (std::size_t i = 0; i < 6 && 3 + i < in.size(); ++i) f.motors[i] = in[3 + i];
+        f.rumble.store(0, std::memory_order_relaxed);
         break;
     case 0x4F:
         if (in.size() > 5) {
@@ -291,6 +311,10 @@ void reset() {
     g_pads[0] = Pad{};
     g_pads[1] = Pad{};
     g_pads[0].connected = true;
+    for (Feel &f : g_feel) {
+        std::fill(std::begin(f.motors), std::end(f.motors), 0xFF);
+        f.rumble.store(0);
+    }
     g_dma[0] = g_dma[1] = Dma{};
     load_card();
 }
@@ -372,6 +396,12 @@ void set_axis(int pad, int axis, std::uint8_t value) {
     if (pad >= 0 && pad < 2 && axis >= 0 && axis < 4) g_pads[pad].axes[axis] = value;
 }
 
+void set_pressure(int pad, int button, std::uint8_t value) {
+    if (pad >= 0 && pad < 2 && button >= 0 && button < 16) g_feel[pad].pressure[button] = value;
+}
+
+std::uint16_t rumble(int pad) { return pad >= 0 && pad < 2 ? g_feel[pad].rumble.load(std::memory_order_relaxed) : 0; }
+
 }
 
 namespace ps2::iop::sio2 {
@@ -386,6 +416,11 @@ void state(ps2::state::Stream &s) {
     s.deque(g_in);
     s.deque(g_out);
     s.pod(g_pads);
+    if (s.loading())
+        for (Feel &f : g_feel) {
+            std::copy(std::begin(kLibpadMotors), std::end(kLibpadMotors), f.motors);
+            f.rumble.store(0);
+        }
     s.pod(g_dma);
     s.size(g_card.address);
     s.pod(g_card.term);

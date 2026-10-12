@@ -322,6 +322,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pad(int buttons, int lx, int ly, int
     ps2::set_pad_axis(3, static_cast<std::uint8_t>(ly));
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pressure(int a, int b, int c, int d) {
+    const int packed[4] = {a, b, c, d};
+    for (int i = 0; i < 16; ++i) ps2::set_pad_pressure(i, static_cast<std::uint8_t>(static_cast<unsigned>(packed[i / 4]) >> (i % 4 * 8)));
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int ps2web_rumble() { return ps2::pad_rumble(); }
+
 extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_resize(int width, int height) {
     ps2::resize_window(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
 }

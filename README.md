@@ -69,11 +69,11 @@ Set your expectations accordingly: two games have been brought up so far. Anothe
 
 The page needs WebGPU for the GPU renderer. Chrome and Edge have it on Windows and macOS. On Linux it is off by default in Chrome and Chromium: turn on `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan` and restart the browser, as the page tells you when it finds no usable adapter. Without WebGPU the software renderer takes over, which is fine for menus and far too slow for 3D. On laptops with two GPUs, a canvas drawn on the discrete GPU sometimes cannot be shown on the screen; the page tries both adapters and falls back to copying frames through a 2D canvas.
 
-The keyboard maps the face buttons to Z (cross), X (circle), A (square) and S (triangle), the shoulders to Q, W, 1 and 2, start and select to Enter and Backspace, the D-pad to the arrow keys and the left stick to I, J, K and L. Gamepads work through the browser's gamepad API, phones get on-screen controls, and F toggles fullscreen. The resolution selector reloads the page at the new size.
+The keyboard maps the face buttons to Z (cross), X (circle), A (square) and S (triangle), the shoulders to Q, W, 1 and 2, start and select to Enter and Backspace, the D-pad to the arrow keys and the left stick to I, J, K and L. Gamepads work through the browser's gamepad API. Their analog triggers reach the game as the DualShock 2's pressure-sensitive L2 and R2, and controllers with motors vibrate when the game asks for it, in browsers that expose vibration (Chrome and Edge do). Phones get on-screen controls, and F toggles fullscreen. The resolution selector reloads the page at the new size.
 
 ## Playing natively
 
-The runner `port.sh` builds for its exploring runs, `build/native-mygame/ps2run`, also plays the game in a window when SDL2 is installed. It draws through wgpu-native on Vulkan and plays sound through SDL. The keyboard uses the page's keys for the buttons, with the arrow keys as both the D-pad and the left stick, and any game controller SDL recognizes works too, the Steam Deck's own controls included.
+The runner `port.sh` builds for its exploring runs, `build/native-mygame/ps2run`, also plays the game in a window when SDL2 is installed. It draws through wgpu-native on Vulkan and plays sound through SDL. The keyboard uses the page's keys for the buttons, with the arrow keys as both the D-pad and the left stick, and any game controller SDL recognizes works too, the Steam Deck's own controls included, with the same trigger pressure and vibration as in the browser.
 
 ```bash
 build/native-mygame/ps2run games/mygame/disc/SLUS_123.45 --disc games/mygame/disc.iso --window --memcard mygame.ps2

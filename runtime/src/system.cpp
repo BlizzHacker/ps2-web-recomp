@@ -524,6 +524,8 @@ std::uint64_t frames_run() { return g_frames; }
 std::uint64_t primitives_drawn() { return gs::primitives_drawn(); }
 void set_pad_buttons(std::uint16_t pressed) { iop::sio2::set_buttons(0, pressed); }
 void set_pad_axis(int axis, std::uint8_t value) { iop::sio2::set_axis(0, axis, value); }
+void set_pad_pressure(int button, std::uint8_t value) { iop::sio2::set_pressure(0, button, value); }
+std::uint16_t pad_rumble() { return iop::sio2::rumble(0); }
 void set_audio_sink(std::function<void(const std::int16_t *, std::size_t)> sink) { iop::spu2::set_sink(std::move(sink)); }
 
 }

@@ -106,6 +106,18 @@ std::uint8_t axis(SDL_GameControllerAxis a) {
     return static_cast<std::uint8_t>(std::clamp((v + 32768) >> 8, 0, 255));
 }
 
+void rumble() {
+    static std::uint16_t last = 0;
+    static Uint32 sent = 0;
+    if (!g_pad) return;
+    const std::uint16_t motors = ps2::pad_rumble();
+    const Uint32 now = SDL_GetTicks();
+    if (motors == last && (!motors || now - sent < 100)) return;
+    last = motors;
+    sent = now;
+    SDL_GameControllerRumble(g_pad, static_cast<Uint16>((motors >> 8) * 257), (motors & 1u) ? 0xFFFF : 0, motors ? 200 : 0);
+}
+
 void poll() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -130,6 +142,7 @@ void poll() {
     std::uint16_t pressed = 0;
     for (const KeyBinding &b : kKeys)
         if (keys[b.key]) pressed |= b.button;
+    std::uint8_t l2 = 0xFF, r2 = 0xFF;
     std::uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
     if (keys[SDL_SCANCODE_LEFT]) lx = 0x00;
     if (keys[SDL_SCANCODE_RIGHT]) lx = 0xFF;
@@ -138,18 +151,27 @@ void poll() {
     if (g_pad) {
         for (const PadBinding &b : kPadButtons)
             if (SDL_GameControllerGetButton(g_pad, b.button)) pressed |= b.mask;
-        if (SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8000) pressed |= kL2;
-        if (SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000) pressed |= kR2;
+        const auto trigger = [&](SDL_GameControllerAxis a, std::uint16_t bit, std::uint8_t &pressure) {
+            const int v = SDL_GameControllerGetAxis(g_pad, a);
+            if (v <= 2000 || (pressed & bit)) return;
+            pressed |= bit;
+            pressure = static_cast<std::uint8_t>(std::max(1, v * 255 / 32767));
+        };
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT, kL2, l2);
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, kR2, r2);
         if (lx == 0x80) lx = axis(SDL_CONTROLLER_AXIS_LEFTX);
         if (ly == 0x80) ly = axis(SDL_CONTROLLER_AXIS_LEFTY);
         rx = axis(SDL_CONTROLLER_AXIS_RIGHTX);
         ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
     }
+    rumble();
     static std::uint64_t last = ~0ull;
     const std::uint64_t state = pressed | (static_cast<std::uint64_t>(rx) << 16) | (static_cast<std::uint64_t>(ry) << 24) | (static_cast<std::uint64_t>(lx) << 32) |
-                                (static_cast<std::uint64_t>(ly) << 40);
+                                (static_cast<std::uint64_t>(ly) << 40) | (static_cast<std::uint64_t>(l2) << 48) | (static_cast<std::uint64_t>(r2) << 56);
     if (state == last) return;
     last = state;
+    ps2::set_pad_pressure(8, l2);
+    ps2::set_pad_pressure(9, r2);
     ps2::set_pad_buttons(pressed);
     ps2::set_pad_axis(0, rx);
     ps2::set_pad_axis(1, ry);
