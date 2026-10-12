@@ -12,6 +12,7 @@ namespace {
 
 std::FILE *g_file = nullptr;
 Reader g_reader;
+Probe g_probe;
 std::uint64_t g_size = 0;
 std::uint32_t g_layer1 = 0;
 std::map<std::string, Entry> g_index;
@@ -82,8 +83,9 @@ bool open(const std::string &path) {
     });
 }
 
-bool open(const std::string &name, std::uint64_t size, Reader reader) {
+bool open(const std::string &name, std::uint64_t size, Reader reader, Probe probe) {
     g_reader = std::move(reader);
+    g_probe = std::move(probe);
     g_size = size;
     g_index.clear();
     index_layer(16, 0);
@@ -111,6 +113,10 @@ bool read(std::uint32_t sector, std::uint32_t count, void *out) {
     const std::size_t got = g_reader(static_cast<std::uint64_t>(sector) * kSector, out, want);
     if (got < want) std::memset(static_cast<std::uint8_t *>(out) + got, 0, want - got);
     return got > 0 || !count;
+}
+
+bool ready(std::uint32_t sector, std::uint32_t count) {
+    return !g_probe || g_probe(static_cast<std::uint64_t>(sector) * kSector, static_cast<std::size_t>(count) * kSector);
 }
 
 std::optional<Entry> find(const std::string &raw) {

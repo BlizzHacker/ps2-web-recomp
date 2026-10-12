@@ -183,12 +183,20 @@ Slot *want(std::uint64_t index) {
     return victim;
 }
 
+void advance(std::uint64_t index) {
+    if (index <= g_last_chunk && g_last_chunk - index <= kReadAhead * 4) return;
+    g_run = index == g_last_chunk + 1 ? g_run + 1 : 0;
+    g_last_chunk = index;
+}
+
+void read_ahead(std::uint64_t index) {
+    for (std::uint64_t k = 1; k <= std::min(g_run * 2, kReadAhead); ++k) want(index + k);
+}
+
 const Slot *chunk(std::uint64_t index) {
     Slot *s = want(index);
-    if (index == g_last_chunk + 1) ++g_run;
-    else if (index != g_last_chunk) g_run = 0;
-    g_last_chunk = index;
-    for (std::uint64_t k = 1; k <= std::min(g_run * 2, kReadAhead); ++k) want(index + k);
+    advance(index);
+    read_ahead(std::max(index, g_last_chunk));
     for (int attempt = 0; s && attempt < 4; ++attempt) {
         for (std::uint32_t state = s->state.load(); state != kReady && state != kFailed; state = s->state.load())
             emscripten_futex_wait(&s->state, state, INFINITY);
@@ -201,6 +209,23 @@ const Slot *chunk(std::uint64_t index) {
         ps2::wake_render_thread();
     }
     return nullptr;
+}
+
+bool disc_ready(std::uint64_t offset, std::size_t size) {
+    if (!size) return true;
+    const std::uint64_t last = (offset + size - 1) / kChunk;
+    bool ready = true;
+    for (std::uint64_t index = offset / kChunk; index <= last; ++index) {
+        Slot *s = want(index);
+        if (s && s->state.load(std::memory_order_acquire) == kFailed) {
+            s->state.store(kWanted, std::memory_order_release);
+            ps2::wake_render_thread();
+        }
+        ready = ready && s && s->state.load(std::memory_order_acquire) == kReady;
+        advance(index);
+    }
+    read_ahead(std::max(last, g_last_chunk));
+    return ready;
 }
 
 std::size_t read_disc(std::uint64_t offset, void *out, std::size_t size) {
@@ -268,7 +293,7 @@ struct Launch {
 
 void *emulate(void *data) {
     const Launch &launch = *static_cast<const Launch *>(data);
-    if (g_disc_size && !ps2::disc::open("disc", g_disc_size, read_disc)) std::fprintf(stderr, "[web] cannot read the disc image\n");
+    if (g_disc_size && !ps2::disc::open("disc", g_disc_size, read_disc, disc_ready)) std::fprintf(stderr, "[web] cannot read the disc image\n");
     std::uint32_t entry = 0;
     if (!ps2::load_elf("/game/core.elf", entry)) {
         std::fprintf(stderr, "cannot load the game executable\n");

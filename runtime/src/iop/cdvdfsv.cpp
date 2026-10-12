@@ -37,11 +37,19 @@ void install_cdvdfsv() {
     g_streaming = false;
     g_stream_pos = 0;
     register_job(kJobFsvRead, [](const Job &j) {
+        if (!disc::ready(j.a, j.b)) {
+            schedule(now() + usec_to_cycles(1000), j);
+            return;
+        }
         read_to_ee(j.a, j.b, j.c);
         sif::complete_call(0x80000595u);
     });
     register_job(kJobFsvComplete, [](const Job &) { sif::complete_call(0x80000595u); });
     register_job(kJobFsvIopRead, [](const Job &j) {
+        if (!disc::ready(j.a, j.b)) {
+            schedule(now() + usec_to_cycles(1000), j);
+            return;
+        }
         std::vector<std::uint8_t> data(static_cast<std::size_t>(j.b) * disc::kSector);
         disc::read(j.a, j.b, data.data());
         for (std::size_t i = 0; i < data.size(); ++i) write8(j.c + static_cast<std::uint32_t>(i), data[i]);
@@ -92,6 +100,7 @@ void install_cdvdfsv() {
         switch (method) {
         case 0x01:
             if (ret_size >= 4) set_ee32(ret, 0);
+            disc::ready(sector, count);
             schedule(now() + delay(count), Job{kJobFsvRead, sector, count, dst});
             return false;
         case 0x04: set_ee32(ret, 1); return true;
@@ -107,6 +116,7 @@ void install_cdvdfsv() {
                 const std::uint32_t pos = g_stream_pos;
                 g_stream_pos += count;
                 set_ee32(ret, count);
+                disc::ready(pos, count);
                 schedule(now() + delay(count), Job{kJobFsvRead, pos, count, dst});
                 return false;
             }
@@ -119,6 +129,7 @@ void install_cdvdfsv() {
         }
         case 0x0D:
             if (ret_size >= 4) set_ee32(ret, 0);
+            disc::ready(sector, count);
             schedule(now() + delay(count), Job{kJobFsvIopRead, sector, count, dst});
             return false;
         case 0x0E: set_ee32(ret, 2); return true;

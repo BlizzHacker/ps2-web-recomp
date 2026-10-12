@@ -66,6 +66,7 @@ bool start_read(std::uint32_t lsn, std::uint32_t sectors, std::uint32_t buffer, 
     if (g_cd.busy) return false;
     g_cd.busy = true;
     g_cd.error = 0;
+    disc::ready(lsn, sectors);
     schedule(now() + read_cycles(sectors), Job{kJobCdRead, lsn, sectors, buffer});
     return true;
 }
@@ -75,6 +76,10 @@ bool start_read(std::uint32_t lsn, std::uint32_t sectors, std::uint32_t buffer, 
 void install_cdvd() {
     g_cd = CdState{};
     register_job(kJobCdRead, [](const Job &j) {
+        if (!disc::ready(j.a, j.b)) {
+            schedule(now() + usec_to_cycles(1000), j);
+            return;
+        }
         std::vector<std::uint8_t> data(static_cast<std::size_t>(j.b) * disc::kSector);
         disc::read(j.a, j.b, data.data());
         for (std::size_t i = 0; i < data.size(); ++i) write8(j.c + static_cast<std::uint32_t>(i), data[i]);
