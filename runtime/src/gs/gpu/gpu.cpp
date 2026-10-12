@@ -416,14 +416,25 @@ Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Ran
     return region(setup[12], setup[13], setup[14], u0, v0, u1, v1);
 }
 
-void batch_ranges();
+Range pages(std::uint32_t bp, std::uint32_t bw, std::uint32_t psm, int x0, int y0, int x1, int y1) {
+    std::uint32_t pw, ph;
+    page_size(psm, pw, ph);
+    const std::uint64_t per_row = std::max<std::uint32_t>(1, bw * 64 / pw);
+    const auto page = [&](int x, int y) {
+        return static_cast<std::uint64_t>(bp) * 256 + (static_cast<std::uint64_t>(std::max(x, 0)) / pw + static_cast<std::uint64_t>(std::max(y, 0)) / ph * per_row) * 8192;
+    };
+    Range r;
+    r.add(page(x0, y0), page(x1, y1) + 8192);
+    return r;
+}
 
 std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi) {
     Batch &b = g_batch;
     lo = hi = 0;
     if (g_batch_reads.empty()) return 0;
-    batch_ranges();
-    const auto written = [&](const Range &t) { return t.overlaps(b.fb_range.lo, b.fb_range.hi) || (b.zwrite && t.overlaps(b.z_range.lo, b.z_range.hi)); };
+    const Range fb = pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy);
+    const Range z = pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy);
+    const auto written = [&](const Range &t) { return t.overlaps(fb.lo, fb.hi) || (b.zwrite && t.overlaps(z.lo, z.hi)); };
     bool any = false;
     for (const Range &t : g_batch_reads) any = any || written(t);
     if (!any) return 0;
@@ -434,7 +445,7 @@ std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32
         if (!(setup[0] & 2u) || reads_own_word(rec, setup)) continue;
         const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
         const Range t = read_range(rec, setup, region(setup[12], setup[13], setup[14], 0, 0, tw - 1, th - 1));
-        for (const Range *w : {&b.fb_range, b.zwrite ? &b.z_range : nullptr})
+        for (const Range *w : {&fb, b.zwrite ? &z : nullptr})
             if (w && t.overlaps(w->lo, w->hi)) shared.add(std::max(t.lo, w->lo), std::min(t.hi, w->hi));
     }
     if (shared.lo >= shared.hi) return 0;
