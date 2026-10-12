@@ -12,6 +12,7 @@
 
 #include "ps2/state.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +34,17 @@ constexpr std::uint32_t kBase[10] = {0x10008000u, 0x10009000u, 0x1000A000u, 0x10
                                      0x1000C000u, 0x1000C400u, 0x1000C800u, 0x1000D000u, 0x1000D400u};
 
 std::uint64_t g_starts[10];
+bool g_mfifo_waiting = false;
+
+// MFIFO: with D_CTRL.MFD set to VIF1, fromSPR fills a ring buffer in main memory (D_RBOR,
+// D_RBSR) and VIF1 runs a chain out of it, stalling while its tag address has caught up
+// with fromSPR's write address.
+bool mfifo_vif1() { return ((g_ctrl >> 2) & 3u) == 2u; }
+std::uint32_t ring(std::uint32_t a) { return g_rbor | (a & g_rbsr); }
+bool tag_data_in_ring(std::uint32_t chcr) {
+    const std::uint32_t id = (chcr >> 28) & 7u;
+    return id == 1 || id == 7;
+}
 
 const std::uint8_t *source(std::uint32_t address) {
     if (address & 0x80000000u) return g_spr + (address & (kScratchpadSize - 1));
@@ -70,6 +82,16 @@ void deliver(int ch, std::uint32_t address, std::uint32_t qwc) {
     }
 }
 
+void deliver_ring(int ch, std::uint32_t address, std::uint32_t qwc) {
+    while (qwc) {
+        const std::uint32_t room = ((g_rbsr - (address & g_rbsr)) >> 4) + 1;
+        const std::uint32_t n = std::min(qwc, room);
+        deliver(ch, address, n);
+        address = ring(address + n * 16);
+        qwc -= n;
+    }
+}
+
 bool vif_stalled(int ch) { return (ch == 0 || ch == 1) && vif::stalled(ch); }
 
 void pause(int ch, bool end) {
@@ -77,18 +99,31 @@ void pause(int ch, bool end) {
     g_ch[ch].pause_end = end;
 }
 
+void run_chain(int ch);
+
 void finish(int ch) {
     Channel &c = g_ch[ch];
     static const bool trace = std::getenv("PS2_TRACE_DMA") != nullptr;
     if (trace && ch <= 4) std::fprintf(stderr, "[dma] ch%d done chcr 0x%08X tadr 0x%08X madr 0x%08X\n", ch, c.chcr, c.tadr, c.madr);
     c.chcr &= ~0x100u;
     hw::dmac_raise(static_cast<unsigned>(ch));
+    if (ch == 8 && g_mfifo_waiting && (g_ch[1].chcr & 0x100u) && !g_ch[1].paused) {
+        g_mfifo_waiting = false;
+        run_chain(1);
+    }
 }
 
 void spr_to_ram(Channel &c, std::uint32_t qwc) {
-    for (std::uint32_t i = 0; i < qwc; ++i)
-        std::memcpy(target(c.madr + i * 16), g_spr + ((c.sadr + i * 16) & (kScratchpadSize - 1)), 16);
+    const bool wrap = mfifo_vif1();
+    for (std::uint32_t i = 0; i < qwc; ++i) {
+        const std::uint32_t at = wrap ? ring(c.madr + i * 16) : c.madr + i * 16;
+        std::memcpy(target(at), g_spr + ((c.sadr + i * 16) & (kScratchpadSize - 1)), 16);
+    }
     c.sadr = (c.sadr + qwc * 16) & (kScratchpadSize - 1);
+}
+
+std::uint32_t spr_advance(std::uint32_t madr, std::uint32_t qwc) {
+    return mfifo_vif1() ? ring(madr + qwc * 16) : madr + qwc * 16;
 }
 
 void run_from_spr_chain() {
@@ -98,7 +133,7 @@ void run_from_spr_chain() {
     if (c.qwc) {
         end = ((c.chcr >> 28) & 7u) == 7u || (tie && (c.chcr & 0x80000000u));
         spr_to_ram(c, c.qwc);
-        c.madr += c.qwc * 16;
+        c.madr = spr_advance(c.madr, c.qwc);
         c.qwc = 0;
     }
     for (int guard = 0; !end && guard < 1'000'000; ++guard) {
@@ -109,7 +144,7 @@ void run_from_spr_chain() {
         const std::uint32_t qwc = static_cast<std::uint32_t>(tag) & 0xFFFFu;
         c.madr = static_cast<std::uint32_t>(tag >> 32);
         spr_to_ram(c, qwc);
-        c.madr += qwc * 16;
+        c.madr = spr_advance(c.madr, qwc);
         end = ((tag >> 28) & 7u) == 7u || (tie && ((tag >> 31) & 1u));
     }
     finish(8);
@@ -119,6 +154,10 @@ void run_normal(int ch) {
     Channel &c = g_ch[ch];
     if (ch == 8) {
         spr_to_ram(c, c.qwc);
+        c.madr = spr_advance(c.madr, c.qwc);
+        c.qwc = 0;
+        finish(8);
+        return;
     } else if ((c.chcr & 1u) || ch == 2 || ch == 0 || ch == 9) {
         deliver(ch, c.madr, c.qwc);
     } else if (ch == 1) {
@@ -145,10 +184,16 @@ bool chain_ends_after_current(const Channel &c) {
 
 void run_chain(int ch) {
     Channel &c = g_ch[ch];
+    const bool mfifo = ch == 1 && mfifo_vif1();
     if (c.qwc) {
         const bool end = chain_ends_after_current(c);
-        deliver(ch, c.madr, c.qwc);
-        c.madr += c.qwc * 16;
+        if (mfifo && tag_data_in_ring(c.chcr)) {
+            deliver_ring(ch, c.madr, c.qwc);
+            c.madr = ring(c.madr + c.qwc * 16);
+        } else {
+            deliver(ch, c.madr, c.qwc);
+            c.madr += c.qwc * 16;
+        }
         c.qwc = 0;
         if (vif_stalled(ch)) {
             pause(ch, end);
@@ -161,6 +206,10 @@ void run_chain(int ch) {
     }
     const bool tte = c.chcr & 0x40u, tie = c.chcr & 0x80u;
     for (int guard = 0; guard < 1'000'000; ++guard) {
+        if (mfifo && ring(c.tadr) == ring(g_ch[8].madr)) {
+            g_mfifo_waiting = true;
+            return;
+        }
         const std::uint8_t *tagp = source(c.tadr);
         std::uint64_t tag;
         std::memcpy(&tag, tagp, 8);
@@ -203,12 +252,24 @@ void run_chain(int ch) {
         }
         default: end = true; break;
         }
+        if (mfifo) {
+            if (id == 1 || id == 7) {
+                data = ring(data);
+                if (id == 1) c.tadr = data + qwc * 16;
+            }
+            c.tadr = ring(c.tadr);
+        }
         c.madr = data;
         if (ch == 2 && g_starts[2] <= 2) std::fprintf(stderr, "[dma] gif tag id %u qwc %u addr 0x%08X data 0x%08X\n", id, qwc, addr_full, data);
         static const bool trace_tags = std::getenv("PS2_TRACE_DMA1") != nullptr;
         if (trace_tags && ch == 1) std::fprintf(stderr, "[dma] ch1 tag at 0x%08X id %u qwc %u irq %d addr 0x%08X next 0x%08X\n", tag_at, id, qwc, irq ? 1 : 0, addr_full, c.tadr);
-        deliver(ch, data, qwc);
-        c.madr = data + qwc * 16;
+        if (mfifo && (id == 1 || id == 7)) {
+            deliver_ring(ch, data, qwc);
+            c.madr = ring(data + qwc * 16);
+        } else {
+            deliver(ch, data, qwc);
+            c.madr = data + qwc * 16;
+        }
         if (vif_stalled(ch)) {
             pause(ch, end || (tie && irq));
             return;
@@ -308,6 +369,7 @@ bool ipu_push(const std::uint8_t *qword) {
 void reset() {
     for (Channel &c : g_ch) c = Channel{};
     g_ctrl = g_pcr = g_sqwc = g_rbsr = g_rbor = g_stadr = g_enable = 0;
+    g_mfifo_waiting = false;
 }
 
 void stats() {
@@ -365,7 +427,10 @@ void write(std::uint32_t a, std::uint32_t v) {
         case 0x00: {
             const bool was = c.chcr & 0x100u;
             c.chcr = v;
-            if (!(v & 0x100u)) c.paused = false;
+            if (!(v & 0x100u)) {
+                c.paused = false;
+                if (ch == 1) g_mfifo_waiting = false;
+            }
             if (!was && (v & 0x100u)) start(ch);
             break;
         }
@@ -395,6 +460,7 @@ void state(ps2::state::Stream &s) {
     s.pod(g_rbor);
     s.pod(g_stadr);
     s.pod(g_enable);
+    s.pod(g_mfifo_waiting);
 }
 
 }
