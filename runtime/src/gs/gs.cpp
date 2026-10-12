@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <functional>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -148,7 +149,46 @@ std::uint32_t bits_per_pixel(std::uint32_t psm) {
     }
 }
 
+struct DownloadKey {
+    std::uint64_t buf, pos, reg;
+    std::uint32_t offset, qwords;
+    bool operator==(const DownloadKey &) const = default;
+};
+
+struct CachedDownload {
+    DownloadKey key;
+    std::vector<std::uint8_t> data;
+    std::uint64_t used;
+};
+
+std::mutex g_cache_mutex;
+std::vector<CachedDownload> g_download_cache;
+std::uint64_t g_cache_clock = 0;
+DownloadKey g_shadow{};
+
+void remember(const DownloadKey &key, const std::uint8_t *data, std::size_t bytes) {
+    std::lock_guard lock(g_cache_mutex);
+    auto it = std::find_if(g_download_cache.begin(), g_download_cache.end(), [&](const CachedDownload &c) { return c.key == key; });
+    if (it == g_download_cache.end()) {
+        if (g_download_cache.size() >= 16)
+            g_download_cache.erase(std::min_element(g_download_cache.begin(), g_download_cache.end(),
+                                                    [](const CachedDownload &a, const CachedDownload &b) { return a.used < b.used; }));
+        it = g_download_cache.insert(g_download_cache.end(), CachedDownload{key, {}, 0});
+    }
+    it->data.assign(data, data + bytes);
+    it->used = ++g_cache_clock;
+}
+
+void forget(const DownloadKey &key) {
+    std::lock_guard lock(g_cache_mutex);
+    std::erase_if(g_download_cache, [&](const CachedDownload &c) { return c.key == key; });
+}
+
 #ifdef PS2_GPU
+std::vector<std::pair<std::uint32_t, std::uint32_t>> g_seen_ranges;
+std::uint32_t g_transfer_serial = 0, g_stale_first = 0, g_stale_bytes = 0;
+bool g_transfer_stale = false;
+
 void download_source(const State &s) {
     const std::uint32_t sbp = static_cast<std::uint32_t>(s.bitbltbuf) & 0x3FFFu, sbw = static_cast<std::uint32_t>(s.bitbltbuf >> 16) & 0x3Fu;
     const std::uint32_t spsm = static_cast<std::uint32_t>(s.bitbltbuf >> 24) & 0x3Fu;
@@ -158,10 +198,33 @@ void download_source(const State &s) {
     const std::uint32_t pw = spsm == PSMT8 || spsm == PSMT4 ? 128 : 64, ph = spsm == PSMT4 ? 128 : spsm == PSMT8 || half ? 64 : 32;
     const std::uint32_t first = page_address(sbp, sbw, x, y, pw, ph);
     const std::uint32_t end = page_address(sbp, sbw, x + w - 1, y + h - 1, pw, ph) + 8192;
-    if (!w || !h || x + w > 2048 || y + h > 2048 || end > kMemorySize) gpu::download(g_memory);
-    else gpu::download(g_memory, first, end - first);
+    ++g_transfer_serial;
+    g_transfer_stale = false;
+    if (!w || !h || x + w > 2048 || y + h > 2048 || end > kMemorySize) {
+        gpu::download(g_memory);
+        return;
+    }
+    const std::pair<std::uint32_t, std::uint32_t> range{first, end - first};
+    if (queue::active() && std::find(g_seen_ranges.begin(), g_seen_ranges.end(), range) != g_seen_ranges.end()) {
+        gpu::download_async(g_memory, first, end - first, g_transfer_serial);
+        g_transfer_stale = true;
+        g_stale_first = first;
+        g_stale_bytes = end - first;
+        return;
+    }
+    gpu::download(g_memory, first, end - first);
+    g_seen_ranges.push_back(range);
+    if (g_seen_ranges.size() > 8) g_seen_ranges.erase(g_seen_ranges.begin());
 }
 #endif
+
+void exact_download() {
+#ifdef PS2_GPU
+    if (!g_transfer_stale) return;
+    g_transfer_stale = false;
+    if (!gpu::finish_download(g_transfer_serial)) gpu::download(g_memory, g_stale_first, g_stale_bytes);
+#endif
+}
 
 void transfer_pixel(std::uint32_t value) {
     const std::uint64_t buf = g_state.bitbltbuf, pos = g_state.trxpos, reg = g_state.trxreg;
@@ -381,6 +444,10 @@ void init() {
 }
 
 void render_reset() {
+#ifdef PS2_GPU
+    g_seen_ranges.clear();
+    g_transfer_stale = false;
+#endif
     init();
     std::memset(&g_state, 0, sizeof g_state);
     std::memset(g_memory, 0, sizeof g_memory);
@@ -391,6 +458,11 @@ void render_reset() {
 }
 
 void reset() {
+    g_shadow = DownloadKey{};
+    {
+        std::lock_guard lock(g_cache_mutex);
+        g_download_cache.clear();
+    }
     g_csr = 0x551B4000ull;
     g_imr = 0x7F00ull;
     if (queue::active()) queue::post(queue::kReset, 0, 0, nullptr, 0);
@@ -608,10 +680,34 @@ void read_image(std::uint8_t *data, std::uint32_t qwords) {
         render_read_image(data, qwords);
         return;
     }
+    DownloadKey key = g_shadow;
+    key.qwords = qwords;
+    g_shadow.offset += qwords * 16;
+    const std::size_t bytes = static_cast<std::size_t>(qwords) * 16;
+    {
+        std::lock_guard lock(g_cache_mutex);
+        const auto it = std::find_if(g_download_cache.begin(), g_download_cache.end(), [&](const CachedDownload &c) { return c.key == key; });
+        if (it != g_download_cache.end() && it->data.size() == bytes) {
+            std::memcpy(data, it->data.data(), bytes);
+            it->used = ++g_cache_clock;
+            queue::post(queue::kDownloadAsync, qwords, 0, &key, sizeof key);
+            return;
+        }
+    }
     const std::uint32_t seen = g_downloads.load();
     const std::uintptr_t target = reinterpret_cast<std::uintptr_t>(data);
     queue::post(queue::kDownload, qwords, 0, &target, sizeof target);
     while (g_downloads.load() == seen) queue::wait(g_downloads, seen);
+    remember(key, data, bytes);
+}
+
+void note_transfer(std::uint32_t reg, std::uint64_t value) {
+    switch (reg) {
+    case 0x50: g_shadow.buf = value; break;
+    case 0x51: g_shadow.pos = value; break;
+    case 0x52: g_shadow.reg = value; break;
+    default: g_shadow.offset = 0; break;
+    }
 }
 
 void render_read_image(std::uint8_t *data, std::uint32_t qwords) {
@@ -898,9 +994,19 @@ Rendered render_pending(const std::function<void(const DisplayRegs &)> &on_prese
         case queue::kDownload: {
             std::uintptr_t target;
             std::memcpy(&target, payload, sizeof target);
+            exact_download();
             render_read_image(reinterpret_cast<std::uint8_t *>(target), h.arg0);
             g_downloads.fetch_add(1);
             queue::notify(g_downloads);
+            break;
+        }
+        case queue::kDownloadAsync: {
+            DownloadKey key;
+            std::memcpy(&key, payload, sizeof key);
+            std::vector<std::uint8_t> fresh(static_cast<std::size_t>(h.arg0) * 16);
+            render_read_image(fresh.data(), h.arg0);
+            if (key.buf == g_state.bitbltbuf && key.pos == g_state.trxpos && key.reg == g_state.trxreg) remember(key, fresh.data(), fresh.size());
+            else forget(key);
             break;
         }
         default: break;

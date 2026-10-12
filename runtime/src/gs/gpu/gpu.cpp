@@ -1232,6 +1232,62 @@ void wait_idle() {
     wait_until(done);
 }
 
+struct PendingDownload {
+    WGPUBuffer buffer = nullptr;
+    std::uint64_t capacity = 0;
+    std::uint8_t *memory = nullptr;
+    std::uint32_t offset = 0, bytes = 0, serial = 0;
+    bool busy = false, ready = false;
+} g_pending;
+
+void collect_download() {
+    if (!g_pending.busy || !g_pending.ready) return;
+    const void *mapped = wgpuBufferGetConstMappedRange(g_pending.buffer, 0, g_pending.bytes);
+    if (mapped) std::memcpy(g_pending.memory + g_pending.offset, mapped, g_pending.bytes);
+    wgpuBufferUnmap(g_pending.buffer);
+    g_pending.busy = g_pending.ready = false;
+}
+
+bool download_async(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes, std::uint32_t serial) {
+    collect_download();
+    if (g_pending.busy) return false;
+    if (g_pending.capacity < bytes) {
+        if (g_pending.buffer) wgpuBufferRelease(g_pending.buffer);
+        g_pending.capacity = bytes;
+        g_pending.buffer = make_buffer(bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+    }
+    flush_all();
+    if (g_scale != 1) dispatch_linear(kResolve, bytes / 4, push_params({offset / 4}));
+    submit();
+    WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
+    wgpuCommandEncoderCopyBufferToBuffer(enc, g_scale == 1 ? g_vram : g_scratch, offset, g_pending.buffer, 0, bytes);
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+    wgpuQueueSubmit(g_queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(enc);
+    g_pending.memory = memory;
+    g_pending.offset = offset;
+    g_pending.bytes = bytes;
+    g_pending.serial = serial;
+    g_pending.busy = true;
+    WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+    cb.mode = WGPUCallbackMode_AllowProcessEvents;
+    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *, void *) {
+        if (status == WGPUMapAsyncStatus_Success) g_pending.ready = true;
+        else g_pending.busy = false;
+    };
+    wgpuBufferMapAsync(g_pending.buffer, WGPUMapMode_Read, 0, bytes, cb);
+    return true;
+}
+
+bool finish_download(std::uint32_t serial) {
+    if (!g_pending.busy || g_pending.serial != serial) return false;
+    while (g_pending.busy && !g_pending.ready) pump();
+    const bool done = g_pending.ready;
+    collect_download();
+    return done;
+}
+
 void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes) {
     flush_all();
     if (g_scale == 1) {

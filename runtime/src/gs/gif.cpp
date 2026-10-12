@@ -107,10 +107,11 @@ void scan(Path &p, const std::uint8_t *data, std::uint32_t qwc) {
         if (p.flg == 0 && p.address_data) {
             for (; i < qwc && p.active; ++i) {
                 const std::uint8_t *at = data + static_cast<std::size_t>(i) * 16;
-                if (((p.regs >> (p.reg * 4)) & 0xFu) == 0xEu && at[8] >= 0x60 && at[8] <= 0x62) {
+                if (((p.regs >> (p.reg * 4)) & 0xFu) == 0xEu && at[8] >= 0x50 && at[8] <= 0x62) {
                     std::uint64_t value;
                     std::memcpy(&value, at, 8);
-                    gs::signal(at[8], value);
+                    if (at[8] >= 0x60) gs::signal(at[8], value);
+                    else if (at[8] <= 0x53) gs::note_transfer(at[8], value);
                 }
                 if (++p.reg >= p.nreg) {
                     p.reg = 0;

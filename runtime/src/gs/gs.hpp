@@ -52,6 +52,7 @@ void state(ps2::state::Stream &s);
 void reset();
 void write(std::uint32_t reg, std::uint64_t value);
 void signal(std::uint32_t reg, std::uint64_t value);
+void note_transfer(std::uint32_t reg, std::uint64_t value);
 void write_packed(std::uint32_t reg, const Reg128 &q);
 void write_image(const std::uint8_t *data, std::uint32_t qwords);
 void read_image(std::uint8_t *data, std::uint32_t qwords);
