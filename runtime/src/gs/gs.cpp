@@ -571,7 +571,11 @@ void write(std::uint32_t reg, std::uint64_t value) {
     case 0x36: case 0x37: s.ctx[reg - 0x36].miptbp2 = value; break;
     case 0x3B: s.texa = value; break;
     case 0x3D: s.fogcol = value; break;
-    case 0x3F: break;
+    case 0x3F:
+#ifdef PS2_GPU
+        if (gpu_on()) gpu::texflush();
+#endif
+        break;
     case 0x40: case 0x41: s.ctx[reg - 0x40].scissor = value; break;
     case 0x42: case 0x43: s.ctx[reg - 0x42].alpha = value; break;
     case 0x44: s.dimx = value; break;
