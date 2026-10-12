@@ -546,8 +546,18 @@ fn texel_y(s: Setup, yi: i32) -> u32 {
     return u32(wrap_coord(yi, 1 << s.th, mode(s, 26u, 2u), s.minv, s.maxv));
 }
 
+var<private> snapshot_lo: u32 = 0u;
+var<private> snapshot_hi: u32 = 0u;
+
+fn load_texel(l: Loc, k: u32) -> u32 {
+    if (l.word >= snapshot_lo && l.word < snapshot_hi) {
+        return (scratch[(l.word - snapshot_lo) * SCALE * SCALE + k] >> l.shift) & l.mask;
+    }
+    return load_at(l, k);
+}
+
 fn fetch(s: Setup, xi: i32, yi: i32, k: u32) -> u32 {
-    return convert(s, load_at(addr(s.tf, texel_x(s, xi), texel_y(s, yi)), k));
+    return convert(s, load_texel(addr(s.tf, texel_x(s, xi), texel_y(s, yi)), k));
 }
 
 fn convert(s: Setup, raw: u32) -> u32 {
@@ -1064,6 +1074,15 @@ fn shade_at(p: u32, s: Setup, x: i32, y: i32, k: u32, px: f32, py: f32) {
 }
 
 @compute @workgroup_size(64)
+fn snapshot(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x + gid.y * 64u * 1024u;
+    if (i >= prm(1u)) {
+        return;
+    }
+    scratch[i] = atomicLoad(&vram[prm(0u) * SCALE * SCALE + i]);
+}
+
+@compute @workgroup_size(64)
 fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = prm(0u) + gid.x + gid.y * 64u * 1024u;
     if (i >= 1048576u) {
@@ -1092,6 +1111,8 @@ fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) l
     let lists = prm(4u);
     let prims = prm(1u);
     let setups = prm(2u);
+    snapshot_lo = prm(5u);
+    snapshot_hi = prm(6u);
     var last_setup = 0xFFFFFFFFu;
     var s: Setup;
     for (var i = 0u; i < count; i = i + 1u) {

@@ -28,8 +28,8 @@ namespace ps2::gs::gpu {
 
 namespace {
 
-enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kPipelines };
-const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve"};
+enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kPipelines };
+const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot"};
 
 constexpr std::uint32_t kParamStride = 256;
 constexpr std::uint32_t kClutSlots = 2048;
@@ -373,6 +373,69 @@ void add_spans(const std::uint32_t *rec, std::uint32_t lo, std::uint32_t hi) {
     }
 }
 
+bool reads_own_word(const std::uint32_t *rec, const std::uint32_t *setup) {
+    const std::uint32_t fpsm = setup[3], tpsm = setup[14];
+    if (rec[1] != 1 || (setup[0] & (16u | 16384u)) != 16u || setup[12] != setup[1] || setup[13] != setup[2]) return false;
+    float f[6], uv[6];
+    std::memcpy(f, rec + 4, sizeof f);
+    std::memcpy(uv, rec + 15, sizeof uv);
+    const float du = (uv[3] - uv[0]) / 16.0f, dv = (uv[4] - uv[1]) / 16.0f;
+    if (f[2] == 0.0f || f[3] == 0.0f || std::fabs(du - f[2]) > 0.0005f * std::fabs(f[2]) || std::fabs(dv - f[3]) > 0.0005f * std::fabs(f[3])) return false;
+    const int x0 = static_cast<int>(rec[2] & 0xFFFFu), y0 = static_cast<int>(rec[2] >> 16), x1 = static_cast<int>(rec[3] & 0xFFFFu), y1 = static_cast<int>(rec[3] >> 16);
+    const auto texel = [](float a, float b, float origin, float span, int p) {
+        return static_cast<int>(std::floor((a + (b - a) * ((static_cast<float>(p) - origin) / span)) / 16.0f));
+    };
+    for (const int y : {y0, y1})
+        if (texel(uv[1], uv[4], f[1], f[3], y) != y) return false;
+    const int ox = texel(uv[0], uv[3], f[0], f[2], x0) - x0;
+    if (texel(uv[0], uv[3], f[0], f[2], x1) - x1 != ox) return false;
+    const auto wide = [](std::uint32_t psm) { return psm == PSMCT32 || psm == PSMCT24 || psm == PSMT8H || psm == PSMT4HL || psm == PSMT4HH; };
+    if (ox == 0) return tpsm == fpsm || (wide(fpsm) && wide(tpsm));
+    const bool half = fpsm == PSMCT16 || fpsm == PSMCT16S;
+    return half && tpsm == fpsm && (ox == 8 || ox == -8) && x1 - x0 < 8 && (x0 & 8) == (x1 & 8) && ((x0 ^ 8) == x0 + ox);
+}
+
+Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Range &whole) {
+    if (rec[1] != 1 || !(setup[0] & 16u)) return whole;
+    float uv[6];
+    std::memcpy(uv, rec + 15, sizeof uv);
+    const int u0 = static_cast<int>(std::floor(std::min(uv[0], uv[3]) / 16.0f)) - 1, u1 = static_cast<int>(std::ceil(std::max(uv[0], uv[3]) / 16.0f)) + 1;
+    const int v0 = static_cast<int>(std::floor(std::min(uv[1], uv[4]) / 16.0f)) - 1, v1 = static_cast<int>(std::ceil(std::max(uv[1], uv[4]) / 16.0f)) + 1;
+    const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
+    if (u0 < 0 || v0 < 0 || u1 >= tw || v1 >= th) return whole;
+    return region(setup[12], setup[13], setup[14], u0, v0, u1, v1);
+}
+
+void batch_ranges();
+
+std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi) {
+    Batch &b = g_batch;
+    lo = hi = 0;
+    if (g_batch_reads.empty()) return 0;
+    batch_ranges();
+    const auto written = [&](const Range &t) { return t.overlaps(b.fb_range.lo, b.fb_range.hi) || (b.zwrite && t.overlaps(b.z_range.lo, b.z_range.hi)); };
+    bool any = false;
+    for (const Range &t : g_batch_reads) any = any || written(t);
+    if (!any) return 0;
+    Range shared;
+    for (std::uint32_t i = 0; i < prims; ++i) {
+        const std::uint32_t *rec = b.prims.data() + i * kPrimWords;
+        const std::uint32_t *setup = b.setups.data() + rec[0] * kSetupWords;
+        if (!(setup[0] & 2u) || reads_own_word(rec, setup)) continue;
+        const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
+        const Range t = read_range(rec, setup, region(setup[12], setup[13], setup[14], 0, 0, tw - 1, th - 1));
+        for (const Range *w : {&b.fb_range, b.zwrite ? &b.z_range : nullptr})
+            if (w && t.overlaps(w->lo, w->hi)) shared.add(std::max(t.lo, w->lo), std::min(t.hi, w->hi));
+    }
+    if (shared.lo >= shared.hi) return 0;
+    lo = static_cast<std::uint32_t>(std::min<std::uint64_t>(shared.lo, kMemorySize) / 4);
+    hi = static_cast<std::uint32_t>(std::min<std::uint64_t>(shared.hi, kMemorySize) / 4);
+    if (hi <= lo) return 0;
+    const std::uint32_t words = (hi - lo) * g_scale * g_scale;
+    dispatch_linear(kSnapshot, words, push_params({lo, words}));
+    return words;
+}
+
 void flush_batch() {
     Batch &b = g_batch;
     if (b.prims.empty()) {
@@ -424,7 +487,9 @@ void flush_batch() {
         }
     }
     for (std::uint32_t t : g_touched) g_tile_count[t] = 0;
-    const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset});
+    std::uint32_t snapshot_lo, snapshot_hi;
+    snapshot_batch(prims, snapshot_lo, snapshot_hi);
+    const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi});
     g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
     b.prims.clear();
     b.setups.clear();
