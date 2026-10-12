@@ -413,7 +413,10 @@ void install_iop_side() {
         const std::uint32_t buff = iop::read32(client + 20) & (kRamSize - 1);
         if (send_size && buff) std::memcpy(g_ram + buff, iop::ram_ptr(send_ptr), std::min(send_size, kRamSize - buff));
         iop::write32(client + 0, 1);
-        const std::uint32_t packet[14] = {0x38u, 0, 0x8000000Au, 0, 0, client, g_iop_rpc_id++, client, fn, send_size, recv, recv_size, 0, iop::read32(client + 36)};
+        // rmode 1 makes the EE answer with an RPC end command, which is what wakes the caller
+        // and runs its end function. Every call asks for it: with rmode 0 the EE would write
+        // the end packet straight over the client structure and nobody would be told.
+        const std::uint32_t packet[14] = {0x38u, 0, 0x8000000Au, 0, 0, client, g_iop_rpc_id++, client, fn, send_size, recv, recv_size, 1, iop::read32(client + 36)};
         send(packet, sizeof packet);
         c.r[2] = 0;
         if (!(mode & 1u) && iop::kernel::current()) {
