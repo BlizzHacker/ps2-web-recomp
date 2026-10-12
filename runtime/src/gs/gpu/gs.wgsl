@@ -703,6 +703,31 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
     let fl = addr(s.ff, ux, uy);
     var zl = Loc(0u, 0u, 0u);
 
+    var dst = 0u;
+    var have_dst = false;
+    if (has(s, F_DATE)) {
+        dst = read_frame(s, fl, k);
+        have_dst = true;
+        if (((dst & 0x80000000u) != 0u) != has(s, F_DATM)) {
+            return;
+        }
+    }
+
+    let zte = has(s, F_ZTE);
+    if (zte) {
+        let ztst = mode(s, 8u, 2u);
+        if (ztst == 0u) {
+            return;
+        }
+        zl = addr(s.zf, ux, uy);
+        if (ztst != 1u) {
+            let old = load_at(zl, k) & s.zmax;
+            if ((ztst == 2u && z < old) || (ztst == 3u && z <= old)) {
+                return;
+            }
+        }
+    }
+
     var r = i32(at.r);
     var g = i32(at.g);
     var b = i32(at.b);
@@ -820,40 +845,6 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
                     write_alpha = false;
                 }
             }
-        }
-    }
-
-    var dst = 0u;
-    var have_dst = false;
-    if (has(s, F_DATE)) {
-        dst = read_frame(s, fl, k);
-        have_dst = true;
-        if (((dst & 0x80000000u) != 0u) != has(s, F_DATM)) {
-            return;
-        }
-    }
-
-    let zte = has(s, F_ZTE);
-    if (zte) {
-        zl = addr(s.zf, ux, uy);
-        let old = load_at(zl, k) & s.zmax;
-        var ok = false;
-        switch mode(s, 8u, 2u) {
-            case 0u {
-                ok = false;
-            }
-            case 1u {
-                ok = true;
-            }
-            case 2u {
-                ok = z >= old;
-            }
-            default {
-                ok = z > old;
-            }
-        }
-        if (!ok) {
-            return;
         }
     }
 
