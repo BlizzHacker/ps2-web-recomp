@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
@@ -107,15 +108,19 @@ std::uint8_t axis(SDL_GameControllerAxis a) {
 }
 
 void rumble() {
-    static std::uint16_t last = 0;
+    static double last_strong = 0.0;
+    static bool last_weak = false;
     static Uint32 sent = 0;
     if (!g_pad) return;
     const std::uint16_t motors = ps2::pad_rumble();
+    const double strong = (motors >> 8) < 16 ? 0.0 : std::sqrt((motors >> 8) / 255.0);
+    const bool weak = motors & 1u;
     const Uint32 now = SDL_GetTicks();
-    if (motors == last && (!motors || now - sent < 100)) return;
-    last = motors;
+    if (std::fabs(strong - last_strong) <= 0.08 && weak == last_weak && (!(strong > 0.0 || weak) || now - sent < 100)) return;
+    last_strong = strong;
+    last_weak = weak;
     sent = now;
-    SDL_GameControllerRumble(g_pad, static_cast<Uint16>((motors >> 8) * 257), (motors & 1u) ? 0xFFFF : 0, motors ? 200 : 0);
+    SDL_GameControllerRumble(g_pad, static_cast<Uint16>(strong * 65535.0), weak ? 0xFFFF : 0, strong > 0.0 || weak ? 200 : 0);
 }
 
 void poll() {

@@ -395,7 +395,8 @@ window.addEventListener('keyup', (e) => { keys.delete(e.code); });
 const padButtons = [[0, 14], [1, 13], [2, 15], [3, 12], [4, 10], [5, 11], [6, 8], [7, 9], [8, 0], [9, 3], [10, 1], [11, 2],
                     [12, 4], [13, 6], [14, 7], [15, 5]];
 const axis = (v) => Math.max(0, Math.min(255, Math.round((v + 1) * 127.5)));
-let lastPad = -1, lastPressure = '', lastRumble = 0, rumbleAt = 0;
+let lastPad = -1, lastPressure = '', lastStrong = 0, lastWeak = 0, rumbleAt = 0;
+const motorStrength = (v) => v < 16 ? 0 : Math.sqrt(v / 255);
 function pollInput() {
   let buttons = 0, lx = 128, ly = 128, rx = 128, ry = 128, gamepad = null;
   const pressure = new Array(16).fill(255);
@@ -438,11 +439,13 @@ function pollInput() {
     Module._ps2web_pressure(packed[0], packed[1], packed[2], packed[3]);
   }
   const rumble = Module._ps2web_rumble(), now = performance.now();
+  const strong = motorStrength(rumble >> 8), weak = rumble & 1;
   const actuator = gamepad && gamepad.vibrationActuator;
-  if (actuator && (rumble !== lastRumble || (rumble && now - rumbleAt > 100))) {
-    lastRumble = rumble;
+  if (actuator && (Math.abs(strong - lastStrong) > 0.08 || weak !== lastWeak || ((strong || weak) && now - rumbleAt > 100))) {
+    lastStrong = strong;
+    lastWeak = weak;
     rumbleAt = now;
-    const done = rumble ? actuator.playEffect('dual-rumble', { duration: 200, weakMagnitude: rumble & 1, strongMagnitude: (rumble >> 8) / 255 }) : actuator.reset();
+    const done = strong || weak ? actuator.playEffect('dual-rumble', { duration: 200, weakMagnitude: weak, strongMagnitude: strong }) : actuator.reset();
     if (done && done.catch) done.catch(() => {});
   }
 }
