@@ -8,6 +8,11 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/threading.h>
+#elif defined(__linux__)
+#include <ctime>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #else
 #include <chrono>
 #include <thread>
@@ -22,6 +27,15 @@ constexpr std::uint64_t align16(std::uint64_t n) { return (n + 15) & ~15ull; }
 Ring g_render, g_vu;
 thread_local Role g_role = Role::Emulation;
 
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+void futex_wait(std::atomic<std::uint32_t> &word, std::uint32_t seen, int timeout_ms) {
+    timespec limit{timeout_ms / 1000, static_cast<long>(timeout_ms % 1000) * 1000000L};
+    syscall(SYS_futex, reinterpret_cast<std::uint32_t *>(&word), FUTEX_WAIT_PRIVATE, seen, timeout_ms < 0 ? nullptr : &limit, nullptr, 0);
+}
+
+void futex_wake(std::atomic<std::uint32_t> &word) { syscall(SYS_futex, reinterpret_cast<std::uint32_t *>(&word), FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0); }
+#endif
+
 }
 
 #ifdef __EMSCRIPTEN__
@@ -34,6 +48,8 @@ EM_ASYNC_JS(void, ps2_wait_async, (std::atomic<std::uint32_t> *word, std::uint32
 void wait(std::atomic<std::uint32_t> &value, std::uint32_t seen) {
 #ifdef __EMSCRIPTEN__
     emscripten_futex_wait(&value, seen, INFINITY);
+#elif defined(__linux__)
+    futex_wait(value, seen, -1);
 #else
     value.wait(seen);
 #endif
@@ -42,6 +58,8 @@ void wait(std::atomic<std::uint32_t> &value, std::uint32_t seen) {
 void notify(std::atomic<std::uint32_t> &value) {
 #ifdef __EMSCRIPTEN__
     emscripten_futex_wake(&value, INT_MAX);
+#elif defined(__linux__)
+    futex_wake(value);
 #else
     value.notify_all();
 #endif
@@ -130,6 +148,8 @@ void Ring::wait_for_work(int timeout_ms) {
 #ifdef __EMSCRIPTEN__
     if (emscripten_is_main_browser_thread()) ps2_wait_async(&posted_, seen, timeout_ms);
     else emscripten_futex_wait(&posted_, seen, timeout_ms);
+#elif defined(__linux__)
+    futex_wait(posted_, seen, timeout_ms);
 #else
     (void)seen;
     std::this_thread::sleep_for(std::chrono::milliseconds(std::min(timeout_ms, 1)));

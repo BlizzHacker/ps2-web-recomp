@@ -8,8 +8,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -57,7 +59,7 @@ SDL_GameController *g_pad = nullptr;
 std::uint32_t g_tex_w = 0, g_tex_h = 0;
 std::uint64_t g_last = 0;
 std::vector<std::uint32_t> g_pixels;
-bool g_gpu_tried = false, g_gpu_present = false;
+bool g_gpu_present = false;
 
 bool create_renderer() {
     g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
@@ -108,6 +110,11 @@ void poll() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) ps2::halt("window closed");
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
+            const bool full = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN;
+            SDL_SetWindowFullscreen(g_window, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+            SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
+        }
         if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
             int w = 0, h = 0;
             SDL_GetWindowSizeInPixels(g_window, &w, &h);
@@ -150,20 +157,7 @@ void poll() {
     ps2::set_pad_axis(3, ly);
 }
 
-void present() {
-    if (!g_gpu_tried) {
-        g_gpu_tried = true;
-        g_gpu_present = attach_gpu();
-        std::fprintf(stderr, "[window] %s\n", g_gpu_present ? "presenting through WebGPU" : "presenting through SDL");
-        if (!g_gpu_present && !create_renderer()) ps2::halt("no renderer");
-    }
-    if (g_gpu_present) {
-        ps2::present_frame();
-        return;
-    }
-    if (!g_renderer) return;
-    std::uint32_t w = 0, h = 0;
-    if (!ps2::display_frame(g_pixels, w, h)) return;
+void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
     if (w != g_tex_w || h != g_tex_h) {
         if (g_texture) SDL_DestroyTexture(g_texture);
         g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, static_cast<int>(w), static_cast<int>(h));
@@ -171,10 +165,19 @@ void present() {
         g_tex_w = w;
         g_tex_h = h;
     }
-    SDL_UpdateTexture(g_texture, nullptr, g_pixels.data(), static_cast<int>(w * 4));
+    SDL_UpdateTexture(g_texture, nullptr, rgba, static_cast<int>(w * 4));
     SDL_RenderClear(g_renderer);
     SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
     SDL_RenderPresent(g_renderer);
+}
+
+void present() {
+    if (g_gpu_present) {
+        ps2::present_frame();
+        return;
+    }
+    std::uint32_t w = 0, h = 0;
+    if (ps2::display_frame(g_pixels, w, h)) show_pixels(g_pixels.data(), w, h);
 }
 
 constexpr Uint32 kAudioBytesPerMs = 48 * 4;
@@ -249,12 +252,13 @@ void queue_audio(const std::int16_t *samples, std::size_t frames) {
 
 }
 
-bool open_window() {
+bool open_window(bool fullscreen) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return false;
     }
-    g_window = SDL_CreateWindow("ps2-web-recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    const Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
+    g_window = SDL_CreateWindow("ps2-web-recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 960, 720, flags);
     if (!g_window) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return false;
@@ -272,6 +276,43 @@ bool open_window() {
     }
     for (int i = 0; i < SDL_NumJoysticks() && !g_pad; ++i)
         if (SDL_IsGameController(i)) g_pad = SDL_GameControllerOpen(i);
-    ps2::g_options.on_vblank = on_vblank;
+    if (fullscreen) SDL_ShowCursor(SDL_DISABLE);
     return true;
+}
+
+int run_window(const std::function<int()> &emulate) {
+    ps2::init_graphics();
+    g_gpu_present = attach_gpu();
+    std::fprintf(stderr, "[window] %s\n", g_gpu_present ? "presenting through WebGPU" : "presenting through SDL");
+    if (!g_gpu_present && !create_renderer()) return 1;
+    const bool threads = !std::getenv("PS2_ONE_THREAD") && !std::getenv("PS2_TIME") && ps2::g_options.frames_dir.empty();
+    if (!threads) {
+        ps2::g_options.on_vblank = on_vblank;
+        return emulate();
+    }
+    ps2::g_options.on_vblank = [] {
+        ps2::post_present();
+        pace();
+    };
+    ps2::start_render_thread();
+    if (!std::getenv("PS2_NO_VU_THREAD")) {
+        ps2::start_vu_thread();
+        std::thread(ps2::run_vu_thread).detach();
+    }
+    std::atomic<bool> done{false};
+    int result = 0;
+    std::thread emulation([&] {
+        result = emulate();
+        done.store(true);
+        ps2::wake_render_thread();
+    });
+    const std::function<void(const std::uint32_t *, std::uint32_t, std::uint32_t)> copy = show_pixels, none;
+    while (!done.load()) {
+        poll();
+        if (ps2::render_pending(g_gpu_present, g_gpu_present ? none : copy, show_speed, 8.0) == ps2::Rendered::idle) ps2::wait_render_work(4);
+    }
+    emulation.join();
+    SDL_Quit();
+    std::fflush(nullptr);
+    std::_Exit(result);
 }

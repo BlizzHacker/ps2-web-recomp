@@ -71,6 +71,16 @@ The page needs WebGPU for the GPU renderer. Chrome and Edge have it on Windows a
 
 The keyboard maps the face buttons to Z (cross), X (circle), A (square) and S (triangle), the shoulders to Q, W, 1 and 2, start and select to Enter and Backspace, the D-pad to the arrow keys and the left stick to I, J, K and L. Gamepads work through the browser's gamepad API, phones get on-screen controls, and F toggles fullscreen. The resolution selector reloads the page at the new size.
 
+## Playing natively
+
+The runner `port.sh` builds for its exploring runs, `build/native-mygame/ps2run`, also plays the game in a window when SDL2 is installed. It draws through wgpu-native on Vulkan and plays sound through SDL. The keyboard uses the page's keys for the buttons, with the arrow keys as both the D-pad and the left stick, and any game controller SDL recognizes works too, the Steam Deck's own controls included.
+
+```bash
+build/native-mygame/ps2run games/mygame/disc/SLUS_123.45 --disc games/mygame/disc.iso --window --memcard mygame.ps2
+```
+
+`--fullscreen` starts in fullscreen and F11 switches back and forth. `PS2_SCALE=2` or `3` raises the internal resolution. As in the browser, the emulation, vector unit 1 and the GS each run on their own thread, which takes God of War II from 43 to 60 frames per second at the native resolution on the test laptop; `PS2_ONE_THREAD=1` puts everything back on one thread. The memory card file uses the same layout as the page's exported cards. On a Steam Deck the runner can be added to Steam as a non-Steam game, though nobody has tried it on one yet.
+
 ## Saves
 
 The page puts a memory card in slot 1 and keeps it in the browser's storage for the address you play from, so progress survives a reload. Games format and use it as they would a real card. **Export card** downloads it as a `.ps2` file in the layout PCSX2 uses, and **Import card** puts such a file back in the slot, so a card can travel between browsers or come from PCSX2. `?nocard` starts with the slot empty.

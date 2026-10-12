@@ -23,7 +23,7 @@ int usage() {
                  "usage: ps2run <elf> [--arg text]... [--frames n] [--ntsc] [--misses file]\n"
                  "              [--disc image.iso] [--memcard card.ps2] [--pal | --ntsc] [--trace-syscalls] [--trace-io] [--trace-threads]\n"
                  "              [--trace-iop] [--trace-iop-hle] [--frames-dir dir] [--frame-every n]\n"
-                 "              [--press frame:button[+button][:frames]]... [--window]\n"
+                 "              [--press frame:button[+button][:frames]]... [--window] [--fullscreen]\n"
                  "              [--save-state frame:file] [--load-state file]\n");
     return 2;
 }
@@ -33,7 +33,7 @@ int usage() {
 int main(int argc, char **argv) {
     if (argc < 2) return usage();
     std::vector<std::string> args{argv[1]};
-    [[maybe_unused]] bool window = false;
+    [[maybe_unused]] bool window = false, fullscreen = false;
     std::string load_path;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -59,6 +59,7 @@ int main(int argc, char **argv) {
         }
 #ifdef PS2_WINDOW
         else if (a == "--window") window = true;
+        else if (a == "--fullscreen") window = fullscreen = true;
 #endif
         else if (a == "--frame-every" && i + 1 < argc) ps2::g_options.frame_every = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         else if (a == "--save-state" && i + 1 < argc) {
@@ -73,25 +74,31 @@ int main(int argc, char **argv) {
     }
 
 #ifdef PS2_WINDOW
-    if (window && !open_window()) return 1;
+    if (window && !open_window(fullscreen)) return 1;
 #endif
     register_generated_code();
     register_generated_vu();
-    std::uint32_t entry = 0;
-    if (!ps2::load_elf(argv[1], entry)) {
-        std::fprintf(stderr, "cannot load %s\n", argv[1]);
-        return 1;
-    }
-    ps2::boot(entry, args);
-    if (!load_path.empty() && !ps2::load_state(load_path)) return 1;
+    const auto emulate = [&]() -> int {
+        std::uint32_t entry = 0;
+        if (!ps2::load_elf(argv[1], entry)) {
+            std::fprintf(stderr, "cannot load %s\n", argv[1]);
+            return 1;
+        }
+        ps2::boot(entry, args);
+        if (!load_path.empty() && !ps2::load_state(load_path)) return 1;
 #ifdef PS2_PROFILE
-    const char *profile = std::getenv("PS2_PROFILE");
-    const char *profile_from = std::getenv("PS2_PROFILE_FROM");
-    if (profile) start_profile(profile_from ? std::strtoull(profile_from, nullptr, 10) : 0);
-    const int result = ps2::run();
-    if (profile) write_profile(profile);
-    return result;
+        const char *profile = std::getenv("PS2_PROFILE");
+        const char *profile_from = std::getenv("PS2_PROFILE_FROM");
+        if (profile) start_profile(profile_from ? std::strtoull(profile_from, nullptr, 10) : 0);
+        const int result = ps2::run();
+        if (profile) write_profile(profile);
+        return result;
 #else
-    return ps2::run();
+        return ps2::run();
 #endif
+    };
+#ifdef PS2_WINDOW
+    if (window) return run_window(emulate);
+#endif
+    return emulate();
 }

@@ -143,9 +143,15 @@ if compgen -G "$game/vu1/*.bin" > /dev/null; then
 else
   echo "none recorded, the page compiles them on the fly"
 fi
+if [ -f "$native/build.ninja" ]; then
+  ninja -C "$native" ps2run > "$native/ninja.log" 2>&1 || { tail -30 "$native/ninja.log"; exit 1; }
+fi
 
 echo "== [6/6] web build"
 "$here/build_web.sh" "$name" "$EMSDK"
 echo
 echo "Done. Serve it with:  python3 scripts/serve.py build/web-$name games/$name/disc.iso"
 echo "and open http://localhost:8620/"
+if [ -x "$native/ps2run" ]; then
+  echo "or play it natively:  build/native-$name/ps2run ${elf#$ROOT/} --disc games/$name/disc.iso --window"
+fi
