@@ -703,7 +703,14 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
         break;
     case 0x79: sif::set_reg(arg(c, 0), arg(c, 1)); ret(c, 0); break;
     case 0x7A: ret(c, static_cast<std::int32_t>(sif::get_reg(arg(c, 0)))); break;
-    case 0x7C: ret(c, 0); break;
+    case 0x7C: {
+        // Deci2Call: a retail console has no DECI2 manager, so opening a socket fails. A game
+        // that gets a valid socket sends its TTY output over it and waits forever for the
+        // write-done event that only a debugger would deliver.
+        const std::uint32_t fn = arg(c, 0);
+        ret(c, fn >= 1 && fn <= 6 ? -1 : 0);
+        break;
+    }
     case 0x7E: ret(c, 0); break;
     case 0x7F: ret(c, kRamSize); break;
     default:
