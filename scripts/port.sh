@@ -7,11 +7,11 @@ usage() {
   cat <<'EOF'
 usage: scripts/port.sh <name> <game.iso | game.zip | game.7z> [options]
 
-Turns a PS2 disc image you own into a browser build in build/web-<name>. It
-reads the boot program named in SYSTEM.CNF, translates its machine code to
-C++, runs it headless to find code the static pass missed (adding those entry
-points and translating again), compiles the vector unit programs those runs
-recorded and builds the page.
+Turns a PS2 disc image you own into a browser build in build/web-<name> and a
+native one in build/native-<name>. It reads the boot program named in
+SYSTEM.CNF, translates its machine code to C++, runs it headless to find code
+the static pass missed (adding those entry points and translating again),
+compiles the vector unit programs those runs recorded and builds both.
 
 options:
   --frames N         frames per exploring run (default 3600)
@@ -19,18 +19,20 @@ options:
                      presses start at frame 300 and cross every 300 frames
   --rounds N         exploring runs at most (default 8)
   --no-explore       translate and build without running the game
+  --native-only      skip the browser build and the Emscripten SDK it needs
 EOF
 }
 
 [ $# -ge 2 ] || { usage; exit 2; }
 name="$1"; source_path="$2"; shift 2
-frames=3600; rounds=8; explore=1; presses=()
+frames=3600; rounds=8; explore=1; web=1; presses=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --frames) frames="$2"; shift ;;
     --press) presses+=(--press "$2"); shift ;;
     --rounds) rounds="$2"; shift ;;
     --no-explore) explore=0 ;;
+    --native-only) web=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -46,7 +48,9 @@ generated="$ROOT/generated/$name"
 native="$ROOT/build/native-$name"
 tools="$ROOT/build/tools"
 export EMSDK="${EMSDK:-$ROOT/tools/emsdk}"
-if [ ! -f "$EMSDK/emsdk_env.sh" ] || [ ! -x "$tools/eerecomp" ] || [ ! -x "$tools/vurecomp" ]; then "$here/setup.sh"; fi
+setup=()
+[ "$web" = 1 ] || setup=(--native-only)
+if { [ "$web" = 1 ] && [ ! -f "$EMSDK/emsdk_env.sh" ]; } || [ ! -x "$tools/eerecomp" ] || [ ! -x "$tools/vurecomp" ]; then "$here/setup.sh" "${setup[@]}"; fi
 mkdir -p "$game/disc" "$game/vu1" "$game/shots" "$generated"
 
 echo "== [1/6] disc"
@@ -100,15 +104,19 @@ echo "== [3/6] machine code to C++"
 touch "$game/entries.txt"
 translate
 
-echo "== [4/6] exploring"
-if [ "$explore" = 1 ]; then
+build_native() {
   if [ ! -f "$native/build.ninja" ]; then
     compilers=()
     if command -v clang++ > /dev/null; then compilers=(-DCMAKE_CXX_COMPILER=clang++); fi
     cmake -S "$ROOT" -B "$native" -G Ninja -DCMAKE_BUILD_TYPE=Release "${compilers[@]}" -DPS2_GENERATED="$generated" > /dev/null
   fi
+  ninja -C "$native" ps2run > "$native/ninja.log" 2>&1 || { tail -30 "$native/ninja.log"; exit 1; }
+}
+
+echo "== [4/6] exploring"
+if [ "$explore" = 1 ]; then
   for ((round = 1; round <= rounds; round++)); do
-    ninja -C "$native" ps2run > "$native/ninja.log" 2>&1 || { tail -30 "$native/ninja.log"; exit 1; }
+    build_native
     rm -f "$game/misses.txt" "$game/explore.ps2"
     PS2_GPU_LOW_POWER=1 PS2_VU_RECORD="$game/vu1" "$native/ps2run" "$elf" --disc "$iso" --misses "$game/misses.txt" --memcard "$game/explore.ps2" \
       --frames "$frames" "${presses[@]}" --frames-dir "$game/shots" --frame-every 300 > "$game/explore.log" 2>&1 || true
@@ -141,17 +149,17 @@ echo "== [5/6] vector unit programs"
 if compgen -G "$game/vu1/*.bin" > /dev/null; then
   "$tools/vurecomp" "$game/vu1" "$generated" | tail -1
 else
-  echo "none recorded, the page compiles them on the fly"
-fi
-if [ -f "$native/build.ninja" ]; then
-  ninja -C "$native" ps2run > "$native/ninja.log" 2>&1 || { tail -30 "$native/ninja.log"; exit 1; }
+  echo "none recorded, the native runner interprets them and the page compiles them on the fly"
 fi
 
-echo "== [6/6] web build"
-"$here/build_web.sh" "$name" "$EMSDK"
-echo
-printf 'Done. Serve it with:  python3 scripts/serve.py %q %q\n' "build/web-$name" "games/$name/disc.iso"
-echo "and open http://localhost:8620/"
-if [ -x "$native/ps2run" ]; then
-  printf 'or play it natively:  %q %q --disc %q --window\n' "build/native-$name/ps2run" "${elf#$ROOT/}" "games/$name/disc.iso"
+echo "== [6/6] builds"
+build_native
+if [ "$web" = 1 ]; then
+  "$here/build_web.sh" "$name" "$EMSDK"
 fi
+echo
+if [ "$web" = 1 ]; then
+  printf 'Done. Serve it with:  python3 scripts/serve.py %q %q\n' "build/web-$name" "games/$name/disc.iso"
+  echo "and open http://localhost:8620/"
+fi
+printf 'Play it natively:  %q %q --disc %q --window\n' "build/native-$name/ps2run" "${elf#$ROOT/}" "games/$name/disc.iso"

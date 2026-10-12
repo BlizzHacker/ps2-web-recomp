@@ -50,7 +50,7 @@ Along the way it also needed a boot path like the BIOS gives, a module loaded fr
 
 ## Port a game of your own
 
-You need git, CMake, Ninja, a C++20 compiler (clang is preferred and picked up automatically), Python 3, and 7-Zip if your disc image is in a `.7z`. Everything has been run on Linux on x86-64. The first run installs the Emscripten SDK into `tools/emsdk`, or uses the one `EMSDK` points to, and downloads wgpu-native for the headless test runner. Expect about 300 MB of disk space per game for the generated code and the builds; the disc image itself is linked, not copied.
+You need git, CMake, Ninja, a C++20 compiler (clang is preferred and picked up automatically), Python 3, and 7-Zip if your disc image is in a `.7z`. Everything has been run on Linux on x86-64. The first run installs the Emscripten SDK into `tools/emsdk`, or uses the one `EMSDK` points to, and downloads wgpu-native for the native runner. With `--native-only` the script skips the browser build and never installs the SDK; the native window then needs the SDL2 development files. Expect about 300 MB of disk space per game for the generated code and the builds; the disc image itself is linked, not copied.
 
 ```bash
 git clone https://github.com/snuri00/ps2-web-recomp.git
@@ -59,7 +59,7 @@ scripts/port.sh mygame "My Game.iso"
 python3 scripts/serve.py build/web-mygame games/mygame/disc.iso    # http://localhost:8620/
 ```
 
-`port.sh` takes a disc image (an ISO, or a ZIP or 7z archive holding one) and does the whole job. It reads the boot program named in the disc's `SYSTEM.CNF`, translates its machine code to C++, and then runs the game headless a few times. Static analysis cannot see every function a game reaches through pointers, so each run writes down the addresses it could not find, the script adds them as entry points and translates again, until a run gets through without new ones. The same runs record the vector unit microprograms the game uploads, which are compiled ahead of time as well. Last it builds the page into `build/web-mygame`. God of War II goes from ISO to page in three and a half minutes on an 8-core laptop.
+`port.sh` takes a disc image (an ISO, or a ZIP or 7z archive holding one) and does the whole job. It reads the boot program named in the disc's `SYSTEM.CNF`, translates its machine code to C++, and then runs the game headless a few times. Static analysis cannot see every function a game reaches through pointers, so each run writes down the addresses it could not find, the script adds them as entry points and translates again, until a run gets through without new ones. The same runs record the vector unit microprograms the game uploads, which are compiled ahead of time as well. Last it builds the page into `build/web-mygame` and the native runner into `build/native-mygame`. God of War II goes from ISO to page in three and a half minutes on an 8-core laptop.
 
 The exploring runs press start and then cross every five seconds, which gets most games through their title screens, and put an empty memory card in slot 1 the way the page does, so they follow the path a player takes. `--press 900:cross` replaces that with your own inputs and `--frames` sets how long each run lasts. Frames from the last run land in `games/mygame/shots`, which is the quickest way to see how far a new game gets. `scripts/build_web.sh mygame` rebuilds only the page.
 
@@ -73,7 +73,7 @@ The keyboard maps the face buttons to Z (cross), X (circle), A (square) and S (t
 
 ## Playing natively
 
-The runner `port.sh` builds for its exploring runs, `build/native-mygame/ps2run`, also plays the game in a window when SDL2 is installed. It draws through wgpu-native on Vulkan and plays sound through SDL. The keyboard uses the page's keys for the buttons, with the arrow keys as both the D-pad and the left stick, and any game controller SDL recognizes works too, the Steam Deck's own controls included, with the same trigger pressure and vibration as in the browser.
+The native runner, `build/native-mygame/ps2run`, plays the game in a window when SDL2 is installed; `scripts/port.sh mygame "My Game.iso" --native-only` builds only this one. It draws through wgpu-native on Vulkan and plays sound through SDL. The keyboard uses the page's keys for the buttons, with the arrow keys as both the D-pad and the left stick, and any game controller SDL recognizes works too, the Steam Deck's own controls included, with the same trigger pressure and vibration as in the browser.
 
 ```bash
 build/native-mygame/ps2run games/mygame/disc/SLUS_123.45 --disc games/mygame/disc.iso --window --memcard mygame.ps2
