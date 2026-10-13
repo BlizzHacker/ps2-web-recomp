@@ -460,7 +460,10 @@ void state(ps2::state::Stream &s) {
     s.pod(g_rbor);
     s.pod(g_stadr);
     s.pod(g_enable);
-    s.pod(g_mfifo_waiting);
+    if (s.loading()) {
+        const Channel &v = g_ch[1];
+        g_mfifo_waiting = mfifo_vif1() && (v.chcr & 0x100u) && !v.paused && !v.qwc && ring(v.tadr) == ring(g_ch[8].madr);
+    }
 }
 
 }

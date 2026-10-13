@@ -48,7 +48,6 @@ struct Voice {
     Envelope vol[2];
     std::uint32_t ssa = 0, lsax = 0, next = 0, block[2] = {};
     bool lsax_written = false, key_on = false, end = false;
-    bool block_end[2] = {};
     Phase phase = kOff;
     Envelope env;
     std::int16_t buffer[56] = {};
@@ -75,6 +74,12 @@ struct Core {
 
 std::vector<std::uint16_t> g_ram(kRamWords);
 Core g_cores[2];
+bool g_block_end[2][24][2];
+
+bool *block_end(const Voice &v) {
+    const int c = &v >= g_cores[1].voices ? 1 : 0;
+    return g_block_end[c][&v - g_cores[c].voices];
+}
 std::uint16_t g_spdif_out = 0, g_spdif_mode = 0, g_spdif_media = 0;
 std::vector<std::int16_t> g_audio;
 bool g_record = false;
@@ -110,7 +115,7 @@ void decode_block(Voice &v, std::int16_t *out) {
         out[i] = static_cast<std::int16_t>(sample);
     }
     v.block[out == v.buffer ? 0 : 1] = at;
-    v.block_end[out == v.buffer ? 0 : 1] = (flags & 1u) != 0;
+    block_end(v)[out == v.buffer ? 0 : 1] = (flags & 1u) != 0;
     if ((flags & 4u) && !v.lsax_written) v.lsax = at;
     v.next = (at + 8) & kRamMask;
     if (flags & 1u) {
@@ -179,9 +184,9 @@ void render_voice(Voice &v, std::int32_t (*sum)[2]) {
         while ((position >> 12) >= 28) {
             position -= 28u << 12;
             std::memmove(v.buffer, v.buffer + 28, 28 * sizeof(std::int16_t));
-            v.end |= v.block_end[0];
+            v.end |= block_end(v)[0];
             v.block[0] = v.block[1];
-            v.block_end[0] = v.block_end[1];
+            block_end(v)[0] = block_end(v)[1];
             v.position = position;
             check_irq(v.block[0], 8);
             decode_block(v, v.buffer + 28);
@@ -452,6 +457,7 @@ void reset() {
     kernel::register_job(kernel::kJobSpuTick, [](const kernel::Job &) { tick(); });
     std::fill(g_ram.begin(), g_ram.end(), 0);
     for (Core &k : g_cores) k = Core{};
+    std::memset(g_block_end, 0, sizeof g_block_end);
     g_spdif_out = g_spdif_mode = g_spdif_media = 0;
     g_audio.clear();
     g_record = std::getenv("PS2_DUMP_AUDIO") != nullptr;
@@ -541,6 +547,9 @@ void state(ps2::state::Stream &s) {
     s.vec(g_ram);
     for (Core &k : g_cores) {
         s.pod(k.voices);
+        if (s.loading())
+            for (const Voice &v : k.voices)
+                for (int i = 0; i < 2; ++i) block_end(v)[i] = (g_ram[v.block[i] & kRamMask] >> 8) & 1u;
         s.pod(k.attr);
         s.pod(k.admas);
         s.pod(k.irqa);
