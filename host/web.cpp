@@ -314,20 +314,22 @@ void *emulate(void *data) {
 
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pad(int buttons, int lx, int ly, int rx, int ry) {
-    ps2::set_pad_buttons(static_cast<std::uint16_t>(buttons));
-    ps2::set_pad_axis(0, static_cast<std::uint8_t>(rx));
-    ps2::set_pad_axis(1, static_cast<std::uint8_t>(ry));
-    ps2::set_pad_axis(2, static_cast<std::uint8_t>(lx));
-    ps2::set_pad_axis(3, static_cast<std::uint8_t>(ly));
+extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pad(int pad, int buttons, int lx, int ly, int rx, int ry) {
+    ps2::set_pad_buttons(static_cast<std::uint16_t>(buttons), pad);
+    ps2::set_pad_axis(0, static_cast<std::uint8_t>(rx), pad);
+    ps2::set_pad_axis(1, static_cast<std::uint8_t>(ry), pad);
+    ps2::set_pad_axis(2, static_cast<std::uint8_t>(lx), pad);
+    ps2::set_pad_axis(3, static_cast<std::uint8_t>(ly), pad);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pressure(int a, int b, int c, int d) {
+extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pad_connected(int pad, int connected) { ps2::set_pad_connected(pad, connected != 0); }
+
+extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_pressure(int pad, int a, int b, int c, int d) {
     const int packed[4] = {a, b, c, d};
-    for (int i = 0; i < 16; ++i) ps2::set_pad_pressure(i, static_cast<std::uint8_t>(static_cast<unsigned>(packed[i / 4]) >> (i % 4 * 8)));
+    for (int i = 0; i < 16; ++i) ps2::set_pad_pressure(i, static_cast<std::uint8_t>(static_cast<unsigned>(packed[i / 4]) >> (i % 4 * 8)), pad);
 }
 
-extern "C" EMSCRIPTEN_KEEPALIVE int ps2web_rumble() { return ps2::pad_rumble(); }
+extern "C" EMSCRIPTEN_KEEPALIVE int ps2web_rumble(int pad) { return ps2::pad_rumble(pad); }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void ps2web_resize(int width, int height) {
     ps2::resize_window(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));

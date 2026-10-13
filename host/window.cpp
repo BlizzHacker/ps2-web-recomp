@@ -56,7 +56,8 @@ SDL_Window *g_window = nullptr;
 SDL_Renderer *g_renderer = nullptr;
 SDL_Texture *g_texture = nullptr;
 SDL_AudioDeviceID g_audio = 0;
-SDL_GameController *g_pad = nullptr;
+// the keyboard drives the first controller port along with the first game controller, a second one is player 2
+SDL_GameController *g_pads[2] = {};
 std::uint32_t g_tex_w = 0, g_tex_h = 0;
 std::uint64_t g_last = 0;
 std::vector<std::uint32_t> g_pixels;
@@ -102,25 +103,88 @@ bool attach_gpu() {
     return ps2::attach_window(target);
 }
 
-std::uint8_t axis(SDL_GameControllerAxis a) {
-    const int v = SDL_GameControllerGetAxis(g_pad, a);
+std::uint8_t axis(SDL_GameController *pad, SDL_GameControllerAxis a) {
+    const int v = SDL_GameControllerGetAxis(pad, a);
     return static_cast<std::uint8_t>(std::clamp((v + 32768) >> 8, 0, 255));
 }
 
-void rumble() {
-    static double last_strong = 0.0;
-    static bool last_weak = false;
-    static Uint32 sent = 0;
-    if (!g_pad) return;
-    const std::uint16_t motors = ps2::pad_rumble();
+void rumble(int port) {
+    static double last_strong[2] = {};
+    static bool last_weak[2] = {};
+    static Uint32 sent[2] = {};
+    SDL_GameController *pad = g_pads[port];
+    if (!pad) return;
+    const std::uint16_t motors = ps2::pad_rumble(port);
     const double strong = (motors >> 8) < 16 ? 0.0 : std::sqrt((motors >> 8) / 255.0);
     const bool weak = motors & 1u;
     const Uint32 now = SDL_GetTicks();
-    if (std::fabs(strong - last_strong) <= 0.08 && weak == last_weak && (!(strong > 0.0 || weak) || now - sent < 100)) return;
-    last_strong = strong;
-    last_weak = weak;
-    sent = now;
-    SDL_GameControllerRumble(g_pad, static_cast<Uint16>(strong * 65535.0), weak ? 0xFFFF : 0, strong > 0.0 || weak ? 200 : 0);
+    if (std::fabs(strong - last_strong[port]) <= 0.08 && weak == last_weak[port] && (!(strong > 0.0 || weak) || now - sent[port] < 100)) return;
+    last_strong[port] = strong;
+    last_weak[port] = weak;
+    sent[port] = now;
+    SDL_GameControllerRumble(pad, static_cast<Uint16>(strong * 65535.0), weak ? 0xFFFF : 0, strong > 0.0 || weak ? 200 : 0);
+}
+
+// a new controller takes the first free port, the second one plugs in player 2
+void open_pad(int device) {
+    const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device);
+    for (SDL_GameController *pad : g_pads)
+        if (pad && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad)) == id) return;
+    for (int port = 0; port < 2; ++port)
+        if (!g_pads[port]) {
+            g_pads[port] = SDL_GameControllerOpen(device);
+            return;
+        }
+}
+
+void poll_port(int port) {
+    static bool plugged[2] = {};
+    SDL_GameController *pad = g_pads[port];
+    if (port > 0 && plugged[port] != (pad != nullptr)) {
+        plugged[port] = pad != nullptr;
+        ps2::set_pad_connected(port, plugged[port]);
+    }
+    std::uint16_t pressed = 0;
+    std::uint8_t l2 = 0xFF, r2 = 0xFF;
+    std::uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
+    if (port == 0) {
+        const Uint8 *keys = SDL_GetKeyboardState(nullptr);
+        for (const KeyBinding &b : kKeys)
+            if (keys[b.key]) pressed |= b.button;
+        if (keys[SDL_SCANCODE_LEFT]) lx = 0x00;
+        if (keys[SDL_SCANCODE_RIGHT]) lx = 0xFF;
+        if (keys[SDL_SCANCODE_UP]) ly = 0x00;
+        if (keys[SDL_SCANCODE_DOWN]) ly = 0xFF;
+    }
+    if (pad) {
+        for (const PadBinding &b : kPadButtons)
+            if (SDL_GameControllerGetButton(pad, b.button)) pressed |= b.mask;
+        const auto trigger = [&](SDL_GameControllerAxis a, std::uint16_t bit, std::uint8_t &pressure) {
+            const int v = SDL_GameControllerGetAxis(pad, a);
+            if (v <= 2000 || (pressed & bit)) return;
+            pressed |= bit;
+            pressure = static_cast<std::uint8_t>(std::max(1, v * 255 / 32767));
+        };
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT, kL2, l2);
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, kR2, r2);
+        if (lx == 0x80) lx = axis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+        if (ly == 0x80) ly = axis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+        rx = axis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+        ry = axis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+    }
+    rumble(port);
+    static std::uint64_t last[2] = {~0ull, ~0ull};
+    const std::uint64_t state = pressed | (static_cast<std::uint64_t>(rx) << 16) | (static_cast<std::uint64_t>(ry) << 24) | (static_cast<std::uint64_t>(lx) << 32) |
+                                (static_cast<std::uint64_t>(ly) << 40) | (static_cast<std::uint64_t>(l2) << 48) | (static_cast<std::uint64_t>(r2) << 56);
+    if (state == last[port]) return;
+    last[port] = state;
+    ps2::set_pad_pressure(8, l2, port);
+    ps2::set_pad_pressure(9, r2, port);
+    ps2::set_pad_buttons(pressed, port);
+    ps2::set_pad_axis(0, rx, port);
+    ps2::set_pad_axis(1, ry, port);
+    ps2::set_pad_axis(2, lx, port);
+    ps2::set_pad_axis(3, ly, port);
 }
 
 void poll() {
@@ -137,51 +201,16 @@ void poll() {
             SDL_GetWindowSizeInPixels(g_window, &w, &h);
             ps2::resize_window(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
         }
-        if (e.type == SDL_CONTROLLERDEVICEADDED && !g_pad) g_pad = SDL_GameControllerOpen(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && g_pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
-            SDL_GameControllerClose(g_pad);
-            g_pad = nullptr;
-        }
+        if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED)
+            for (SDL_GameController *&pad : g_pads)
+                if (pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
+                    SDL_GameControllerClose(pad);
+                    pad = nullptr;
+                }
     }
-    const Uint8 *keys = SDL_GetKeyboardState(nullptr);
-    std::uint16_t pressed = 0;
-    for (const KeyBinding &b : kKeys)
-        if (keys[b.key]) pressed |= b.button;
-    std::uint8_t l2 = 0xFF, r2 = 0xFF;
-    std::uint8_t lx = 0x80, ly = 0x80, rx = 0x80, ry = 0x80;
-    if (keys[SDL_SCANCODE_LEFT]) lx = 0x00;
-    if (keys[SDL_SCANCODE_RIGHT]) lx = 0xFF;
-    if (keys[SDL_SCANCODE_UP]) ly = 0x00;
-    if (keys[SDL_SCANCODE_DOWN]) ly = 0xFF;
-    if (g_pad) {
-        for (const PadBinding &b : kPadButtons)
-            if (SDL_GameControllerGetButton(g_pad, b.button)) pressed |= b.mask;
-        const auto trigger = [&](SDL_GameControllerAxis a, std::uint16_t bit, std::uint8_t &pressure) {
-            const int v = SDL_GameControllerGetAxis(g_pad, a);
-            if (v <= 2000 || (pressed & bit)) return;
-            pressed |= bit;
-            pressure = static_cast<std::uint8_t>(std::max(1, v * 255 / 32767));
-        };
-        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT, kL2, l2);
-        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, kR2, r2);
-        if (lx == 0x80) lx = axis(SDL_CONTROLLER_AXIS_LEFTX);
-        if (ly == 0x80) ly = axis(SDL_CONTROLLER_AXIS_LEFTY);
-        rx = axis(SDL_CONTROLLER_AXIS_RIGHTX);
-        ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
-    }
-    rumble();
-    static std::uint64_t last = ~0ull;
-    const std::uint64_t state = pressed | (static_cast<std::uint64_t>(rx) << 16) | (static_cast<std::uint64_t>(ry) << 24) | (static_cast<std::uint64_t>(lx) << 32) |
-                                (static_cast<std::uint64_t>(ly) << 40) | (static_cast<std::uint64_t>(l2) << 48) | (static_cast<std::uint64_t>(r2) << 56);
-    if (state == last) return;
-    last = state;
-    ps2::set_pad_pressure(8, l2);
-    ps2::set_pad_pressure(9, r2);
-    ps2::set_pad_buttons(pressed);
-    ps2::set_pad_axis(0, rx);
-    ps2::set_pad_axis(1, ry);
-    ps2::set_pad_axis(2, lx);
-    ps2::set_pad_axis(3, ly);
+    poll_port(0);
+    poll_port(1);
 }
 
 void show_pixels(const std::uint32_t *rgba, std::uint32_t w, std::uint32_t h) {
@@ -301,8 +330,8 @@ bool open_window(bool fullscreen) {
         SDL_PauseAudioDevice(g_audio, 0);
         ps2::set_audio_sink(queue_audio);
     }
-    for (int i = 0; i < SDL_NumJoysticks() && !g_pad; ++i)
-        if (SDL_IsGameController(i)) g_pad = SDL_GameControllerOpen(i);
+    for (int i = 0; i < SDL_NumJoysticks(); ++i)
+        if (SDL_IsGameController(i)) open_pad(i);
     if (fullscreen) SDL_ShowCursor(SDL_DISABLE);
     return true;
 }

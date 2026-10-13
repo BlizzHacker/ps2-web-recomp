@@ -62,6 +62,8 @@ std::uint32_t g_index = 0;
 std::uint32_t g_stat = 0;
 std::deque<std::uint8_t> g_in, g_out;
 Pad g_pads[2];
+// which ports the host has a controller in; kept out of save states so loading one does not unplug a pad
+bool g_plugged[2] = {true, false};
 Feel g_feel[2];
 Card g_card;
 Dma g_dma[2];
@@ -310,7 +312,8 @@ void reset() {
     g_out.clear();
     g_pads[0] = Pad{};
     g_pads[1] = Pad{};
-    g_pads[0].connected = true;
+    g_pads[0].connected = g_plugged[0];
+    g_pads[1].connected = g_plugged[1];
     for (Feel &f : g_feel) {
         std::fill(std::begin(f.motors), std::end(f.motors), 0xFF);
         f.rumble.store(0);
@@ -400,6 +403,10 @@ void set_pressure(int pad, int button, std::uint8_t value) {
     if (pad >= 0 && pad < 2 && button >= 0 && button < 16) g_feel[pad].pressure[button] = value;
 }
 
+void set_connected(int pad, bool connected) {
+    if (pad >= 0 && pad < 2) g_pads[pad].connected = g_plugged[pad] = connected;
+}
+
 std::uint16_t rumble(int pad) { return pad >= 0 && pad < 2 ? g_feel[pad].rumble.load(std::memory_order_relaxed) : 0; }
 
 }
@@ -416,11 +423,14 @@ void state(ps2::state::Stream &s) {
     s.deque(g_in);
     s.deque(g_out);
     s.pod(g_pads);
-    if (s.loading())
+    if (s.loading()) {
+        g_pads[0].connected = g_plugged[0];
+        g_pads[1].connected = g_plugged[1];
         for (Feel &f : g_feel) {
             std::copy(std::begin(kLibpadMotors), std::end(kLibpadMotors), f.motors);
             f.rumble.store(0);
         }
+    }
     s.pod(g_dma);
     s.size(g_card.address);
     s.pod(g_card.term);

@@ -111,10 +111,12 @@ double gpu_busy_ms();
 void browser_yield();
 std::uint64_t frames_run();
 std::uint64_t primitives_drawn();
-void set_pad_buttons(std::uint16_t pressed);
-void set_pad_axis(int axis, std::uint8_t value);
-void set_pad_pressure(int button, std::uint8_t value);
-std::uint16_t pad_rumble();
+// pad 0 is the first controller port, pad 1 the second, which starts unplugged
+void set_pad_buttons(std::uint16_t pressed, int pad = 0);
+void set_pad_axis(int axis, std::uint8_t value, int pad = 0);
+void set_pad_pressure(int button, std::uint8_t value, int pad = 0);
+void set_pad_connected(int pad, bool connected);
+std::uint16_t pad_rumble(int pad = 0);
 void set_audio_sink(std::function<void(const std::int16_t *samples, std::size_t frames)> sink);
 
 }
