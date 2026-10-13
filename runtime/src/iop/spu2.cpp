@@ -88,7 +88,6 @@ bool g_record = false;
 std::function<void(const std::int16_t *, std::size_t)> g_sink;
 std::uint64_t g_next_tick = 0;
 bool g_tick_pending = false;
-std::uint32_t g_ring_pos = 0;
 
 void check_irq(std::uint32_t address, std::uint32_t words) {
     for (Core &k : g_cores) {
@@ -252,8 +251,9 @@ std::int32_t master(std::uint16_t reg) { return reg & 0x8000u ? 0x7FFF : static_
 // output), voice 1, voice 3; at 0x1000+c*0x800: dry L/R, wet L/R. Those writes trip IRQA, and some games (Burnout 3:
 // IRQA 0x400) use that as their audio clock. One range check per ring per batch keeps it cheap.
 void write_rings(int core, const std::int16_t (*rings)[kBatch]) {
+    const auto pos = static_cast<std::uint32_t>(g_next_tick / (kBatch * kCyclesPerSample) % (kRingWords / kBatch) * kBatch);
     for (std::uint32_t r = 0; r < 8; ++r) {
-        const std::uint32_t at = (r < 4 ? 0u : 0x1000u) + core * 0x800u + (r & 3u) * kRingWords + g_ring_pos;
+        const std::uint32_t at = (r < 4 ? 0u : 0x1000u) + core * 0x800u + (r & 3u) * kRingWords + pos;
         for (unsigned n = 0; n < kBatch; ++n) g_ram[at + n] = static_cast<std::uint16_t>(rings[r][n]);
         check_irq(at, kBatch);
     }
@@ -300,7 +300,6 @@ void tick() {
     }
     write_rings(0, rings[0]);
     write_rings(1, rings[1]);
-    g_ring_pos = (g_ring_pos + kBatch) % kRingWords;
     if (count && ++ticks % 15000 == 0)
         std::fprintf(stderr, "[spu2] %.1f voices per batch (attack %.1f decay %.1f sustain %.1f release %.1f)\n", static_cast<double>(active) / ticks,
                      static_cast<double>(phases[1]) / ticks, static_cast<double>(phases[2]) / ticks, static_cast<double>(phases[3]) / ticks, static_cast<double>(phases[4]) / ticks);
@@ -499,7 +498,6 @@ void reset() {
     g_record = std::getenv("PS2_DUMP_AUDIO") != nullptr;
     g_next_tick = 0;
     g_tick_pending = false;
-    g_ring_pos = 0;
 }
 
 std::uint16_t *ram() { return g_ram.data(); }
@@ -611,7 +609,6 @@ void state(ps2::state::Stream &s) {
     s.pod(g_spdif_media);
     s.pod(g_next_tick);
     s.pod(g_tick_pending);
-    s.pod(g_ring_pos);
 }
 
 }
