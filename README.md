@@ -1,6 +1,6 @@
 # PS2 Web Recomp
 
-PlayStation 2 games running in the browser without an emulator. The game's Emotion Engine machine code is translated ahead of time into C++, compiled to WebAssembly, and linked against a reimplementation of the PS2's operating system and hardware that draws with WebGPU.
+PlayStation 2 games running in the browser through static recompilation. The game's Emotion Engine machine code is translated ahead of time into C++ and compiled to WebAssembly, so the main CPU is never interpreted; the rest of the console, its operating system and hardware, is emulated by a runtime that draws with WebGPU.
 
 <p align="center">
   <img src="docs/media/demo.webp" alt="Gran Turismo 4 running in a browser" width="720">
