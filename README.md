@@ -50,7 +50,7 @@ Along the way it also needed a boot path like the BIOS gives, a module loaded fr
 
 ## Port a game of your own
 
-You need git, CMake, Ninja, a C++20 compiler (clang is preferred and picked up automatically), Python 3, and 7-Zip if your disc image is in a `.7z`. Everything has been run on Linux on x86-64. The first run installs the Emscripten SDK into `tools/emsdk`, or uses the one `EMSDK` points to, and downloads wgpu-native for the native runner. With `--native-only` the script skips the browser build and never installs the SDK; the native window then needs the SDL2 development files. Expect about 300 MB of disk space per game for the generated code and the builds; the disc image itself is linked, not copied.
+You need git, CMake, Ninja, a C++20 compiler (clang is preferred and picked up automatically), Python 3, and 7-Zip if your disc image is in a `.7z`. Everything has been run on Linux on x86-64, and the scripts also build on macOS on Apple silicon, where the scripts need a newer bash than the system 3.2 (`brew install bash cmake ninja sevenzip`) and the native runner links wgpu-native against Metal. The first run installs the Emscripten SDK into `tools/emsdk`, or uses the one `EMSDK` points to, and downloads wgpu-native for the native runner. With `--native-only` the script skips the browser build and never installs the SDK; the native window then needs the SDL2 development files. Expect about 300 MB of disk space per game for the generated code and the builds; the disc image itself is linked, not copied.
 
 ```bash
 git clone https://github.com/snuri00/ps2-web-recomp.git
