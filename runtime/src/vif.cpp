@@ -229,7 +229,7 @@ void execute(int unit, std::uint32_t cmd, const std::uint32_t *data) {
     case 0x03: u.base = imm & 0x3FFu; break;
     case 0x04: u.itops = imm & 0x3FFu; break;
     case 0x05: u.mode = imm & 3u; break;
-    case 0x06: break;
+    case 0x06: gif::set_path3_masked((imm >> 15) & 1u); break;
     case 0x07: u.mark = imm; break;
     case 0x10: case 0x11: case 0x13: break;
     case 0x14: case 0x15: run_vu(unit, imm * 8u); break;
