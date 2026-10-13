@@ -19,5 +19,7 @@ void scan_signals(int path, const std::uint8_t *data, std::uint32_t qwc);
 bool busy(int path);
 std::uint32_t read(std::uint32_t a);
 void write(std::uint32_t a, std::uint32_t v);
+// MSKPATH3 from VIF1, reported back to the EE in GIF_STAT.M3P
+void set_path3_masked(bool masked);
 
 }

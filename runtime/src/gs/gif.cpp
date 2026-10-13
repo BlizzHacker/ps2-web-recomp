@@ -186,13 +186,19 @@ void stats() {
 }
 
 std::uint32_t read(std::uint32_t a) {
-    if ((a & 0xF0u) == 0x20u) return g_stat;
+    // While PATH3 is masked a real GIF holds the stalled channel 2 transfer in its FIFO, and
+    // games wait for FQC to read non-zero before they touch the GS; transfers here are
+    // immediate, so report the FIFO full for as long as the mask is up.
+    if ((a & 0xF0u) == 0x20u) return g_stat | ((g_stat & 2u) ? 16u << 24 : 0u);
     return 0;
 }
 
 void write(std::uint32_t a, std::uint32_t v) {
     if ((a & 0xF0u) == 0x00u && (v & 1u)) reset();
+    if ((a & 0xF0u) == 0x10u) g_stat = (g_stat & ~1u) | (v & 1u);
 }
+
+void set_path3_masked(bool masked) { g_stat = (g_stat & ~2u) | (masked ? 2u : 0u); }
 
 }
 
