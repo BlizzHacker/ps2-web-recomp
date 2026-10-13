@@ -19,8 +19,7 @@ if [ ! -f "$ROOT/third_party/wgpu-native/lib/libwgpu_native.a" ]; then
   "$ROOT/scripts/fetch_wgpu.sh"
 fi
 
-compilers=()
-if command -v clang++ > /dev/null; then compilers=(-DCMAKE_CXX_COMPILER=clang++); fi
-cmake -S "$ROOT" -B "$ROOT/build/tools" -G Ninja -DCMAKE_BUILD_TYPE=Release "${compilers[@]}" > /dev/null
+. "$ROOT/scripts/cxx.sh"
+cmake -S "$ROOT" -B "$ROOT/build/tools" -G Ninja -DCMAKE_BUILD_TYPE=Release "${cxx_flags[@]}" > /dev/null
 ninja -C "$ROOT/build/tools" eerecomp vurecomp
 echo "== ready"

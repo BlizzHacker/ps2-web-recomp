@@ -106,9 +106,8 @@ translate
 
 build_native() {
   if [ ! -f "$native/build.ninja" ]; then
-    compilers=()
-    if command -v clang++ > /dev/null; then compilers=(-DCMAKE_CXX_COMPILER=clang++); fi
-    cmake -S "$ROOT" -B "$native" -G Ninja -DCMAKE_BUILD_TYPE=Release "${compilers[@]}" -DPS2_GENERATED="$generated" > /dev/null
+    . "$here/cxx.sh"
+    cmake -S "$ROOT" -B "$native" -G Ninja -DCMAKE_BUILD_TYPE=Release "${cxx_flags[@]}" -DPS2_GENERATED="$generated" > /dev/null
   fi
   ninja -C "$native" ps2run > "$native/ninja.log" 2>&1 || { tail -30 "$native/ninja.log"; exit 1; }
 }
