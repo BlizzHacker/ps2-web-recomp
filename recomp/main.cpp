@@ -91,7 +91,7 @@ std::vector<Snr2Module> read_modules(const std::string &dir) {
 }
 
 int usage() {
-    std::fprintf(stderr, "usage: eerecomp <elf> [--entries file] [--modules dir] [--probes file] [--out dir] [--stats]\n");
+    std::fprintf(stderr, "usage: eerecomp <elf> [--entries file] [--modules dir] [--probes file] [--overlay addr:file]... [--out dir] [--stats]\n");
     return 2;
 }
 
@@ -100,6 +100,7 @@ int usage() {
 int main(int argc, char **argv) {
     if (argc < 2) return usage();
     std::string elf_path = argv[1], entries_path, out, probes_path, modules_dir;
+    std::vector<std::pair<std::uint32_t, std::string>> overlays;
     bool stats = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -108,13 +109,28 @@ int main(int argc, char **argv) {
         else if (arg == "--out" && i + 1 < argc) out = argv[++i];
         else if (arg == "--probes" && i + 1 < argc) probes_path = argv[++i];
         else if (arg == "--modules" && i + 1 < argc) modules_dir = argv[++i];
+        else if (arg == "--overlay" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            const auto colon = spec.find(':');
+            if (colon == std::string::npos) return usage();
+            overlays.emplace_back(static_cast<std::uint32_t>(std::strtoul(spec.c_str(), nullptr, 0)), spec.substr(colon + 1));
+        }
         else return usage();
     }
 
     try {
-        const Image image = Image::load(elf_path);
+        Image image = Image::load(elf_path);
         const Entries entries = entries_path.empty() ? Entries{} : read_entries(entries_path);
         const Links imports = snr2_imports(image);
+        for (const auto &[address, path] : overlays) {
+            std::ifstream file(path, std::ios::binary);
+            if (!file) throw std::runtime_error("cannot open overlay " + path);
+            std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            bytes.resize(bytes.size() & ~3u);
+            const std::size_t overlay_size = bytes.size();
+            image.add_raw(address, std::move(bytes));
+            std::printf("overlay %zu KiB at 0x%08X\n", overlay_size / 1024, address);
+        }
         Program program = analyse(image, entries.main, dynamic_sites(imports));
         std::map<Op, std::size_t> histogram;
         for (std::uint32_t pc = program.base; pc < program.end; pc += 4)

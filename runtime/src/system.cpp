@@ -203,6 +203,21 @@ void halt(const std::string &reason) {
     if (!g_halted) std::fprintf(stderr, "[ee] halted: %s\n", reason.c_str());
     g_halted = true;
     g_halt_reason = reason;
+#ifndef __EMSCRIPTEN__
+    // Games that decompress their executable into RAM at boot (e.g. Kingdom
+    // Hearts) stall the static recompiler on code that is not in the ELF.
+    // Dump EE RAM at the halt so the missing region can be recovered and
+    // translated as an overlay image.
+    if (const char *path = std::getenv("PS2_DUMP_RAM")) {
+        std::ofstream out(path, std::ios::binary);
+        if (out) {
+            out.write(reinterpret_cast<const char *>(g_ram), kRamSize);
+            std::fprintf(stderr, "[ram] dumped %u MiB to %s\n", kRamSize >> 20, path);
+        } else {
+            std::fprintf(stderr, "[ram] cannot write %s\n", path);
+        }
+    }
+#endif
 }
 
 bool halted() { return g_halted; }
